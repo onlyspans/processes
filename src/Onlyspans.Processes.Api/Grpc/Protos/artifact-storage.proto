@@ -7,6 +7,8 @@ option csharp_namespace = "ArtifactStorage.Communication";
 // Artifact Storage — thin service with pluggable backend (local FS / S3).
 // Stores immutable deployment snapshots created by Snapper.
 // Processes calls GetSnapshot to retrieve the snapshot before sending it to Worker.
+
+// TODO prolly need to rework
 service ArtifactStorageService {
   rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
 }

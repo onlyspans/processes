@@ -6,6 +6,7 @@ package onlyspans.processes;
 
 import "google/protobuf/timestamp.proto";
 
+// TODO check this sh after artifact-storage is done 
 service ProcessesGrpc {
   rpc GetProcess (GetProcessRequest) returns (GetProcessResult);
   rpc ListByProject (ListByProjectRequest) returns (ListByProjectResult);
