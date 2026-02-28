@@ -1,0 +1,10 @@
+steps:
+  deploy:
+    script: kubectl apply -f deployment.yaml
+
+  approve:
+    type: approval
+    timeout: 1h
+
+  rollout:
+    script: kubectl rollout status deployment/myapp

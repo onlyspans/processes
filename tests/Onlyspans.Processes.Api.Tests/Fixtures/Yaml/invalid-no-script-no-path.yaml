@@ -1,0 +1,3 @@
+steps:
+  empty-step:
+    description: "This step has no script and no script-path"

@@ -1,0 +1,180 @@
+syntax = "proto3";
+
+option csharp_namespace = "Onlyspans.Processes.Api.Protos";
+
+package onlyspans.processes;
+
+import "google/protobuf/timestamp.proto";
+
+service ProcessesGrpc {
+  rpc GetProcess (GetProcessRequest) returns (GetProcessResult);
+  rpc ListByProject (ListByProjectRequest) returns (ListByProjectResult);
+  rpc CreateProcess (CreateProcessRequest) returns (CreateProcessResult);
+  rpc ValidateProcess (ValidateProcessRequest) returns (ValidateProcessResult);
+  rpc DeployProcess (DeployProcessRequest) returns (DeployProcessResult);
+}
+
+// --- Shared errors ---
+
+message NotFoundError {
+  string message = 1;
+}
+
+message InternalError {
+  string message = 1;
+  optional string trace = 2;
+}
+
+// --- Requests ---
+
+message GetProcessRequest {
+  string id = 1;
+}
+
+message ListByProjectRequest {
+  string project_id = 1;
+}
+
+message CreateProcessRequest {
+  string project_id = 1;
+  string environment_id = 2;
+  string release_version = 3;
+  string yaml = 4;
+}
+
+message ValidateProcessRequest {
+  string project_id = 1;
+  string environment_id = 2;
+  string yaml = 3;
+}
+
+message DeployProcessRequest {
+  string process_id = 1;
+  string target_id = 2;
+  string target_type = 3;
+  string environment_id = 4;
+  string snapshot_key = 5;
+}
+
+// --- Results ---
+
+message GetProcessResult {
+  oneof result {
+    ProcessData success = 1;
+    NotFoundError not_found = 2;
+    InternalError internal_error = 3;
+  }
+}
+
+message ListByProjectResult {
+  message Success {
+    repeated ProcessData processes = 1;
+  }
+
+  oneof result {
+    Success success = 1;
+    InternalError internal_error = 2;
+  }
+}
+
+message CreateProcessResult {
+  message ValidationError {
+    repeated string errors = 1;
+  }
+
+  oneof result {
+    ProcessData success = 1;
+    ValidationError validation_error = 2;
+    InternalError internal_error = 3;
+  }
+}
+
+message ValidateProcessResult {
+  message Success {
+    repeated string warnings = 1;
+    repeated string unresolved_variables = 2;
+    repeated ResolvedStep steps = 3;
+  }
+
+  message ValidationError {
+    repeated string errors = 1;
+    repeated string warnings = 2;
+  }
+
+  oneof result {
+    Success success = 1;
+    ValidationError validation_error = 2;
+    InternalError internal_error = 3;
+  }
+}
+
+message DeployProcessResult {
+  message Success {
+    string deployment_id = 1;
+    string process_id = 2;
+    string status = 3;
+    google.protobuf.Timestamp completed_at = 4;
+    optional string summary = 5;
+  }
+
+  message Error {
+    string code = 1;
+    string message = 2;
+  }
+
+  oneof result {
+    Success success = 1;
+    Error error = 2;
+    InternalError internal_error = 3;
+  }
+}
+
+// --- Data messages ---
+
+message ProcessData {
+  string id = 1;
+  string project_id = 2;
+  string environment_id = 3;
+  string release_version = 4;
+  string status = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+  google.protobuf.Timestamp completed_at = 8;
+  int32 steps_count = 9;
+  repeated StepData steps = 10;
+  repeated VariableData variables = 11;
+}
+
+message StepData {
+  string id = 1;
+  string name = 2;
+  int32 order = 3;
+  optional string description = 4;
+  string type = 5;
+  optional string script = 6;
+  optional string script_path = 7;
+  bool optional = 8;
+  bool blocking = 9;
+  string on_failure = 10;
+  optional string timeout = 11;
+  string status = 12;
+}
+
+message VariableData {
+  string name = 1;
+  string source = 2;
+  bool has_value = 3;
+}
+
+message ResolvedStep {
+  string name = 1;
+  int32 order = 2;
+  optional string description = 3;
+  string type = 4;
+  optional string script = 5;
+  optional string script_path = 6;
+  bool optional = 7;
+  bool blocking = 8;
+  optional string on_failure = 9;
+  optional string timeout = 10;
+}

@@ -1,0 +1,4 @@
+steps:
+  build:
+    script: dotnet build
+    script-path: ./scripts/build.sh

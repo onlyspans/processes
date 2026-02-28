@@ -1,0 +1,3 @@
+variables:
+  - name: SOME_VAR
+    value: some-value

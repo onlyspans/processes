@@ -1,0 +1,8 @@
+﻿<Solution>
+  <Folder Name="/src/">
+    <Project Path="src\Onlyspans.Processes.Api\Onlyspans.Processes.Api.csproj" Type="Classic C#" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests\Onlyspans.Processes.Api.Tests\Onlyspans.Processes.Api.Tests.csproj" Type="Classic C#" />
+  </Folder>
+</Solution>

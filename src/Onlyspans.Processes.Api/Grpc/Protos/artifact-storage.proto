@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package artifactstorage;
+
+option csharp_namespace = "ArtifactStorage.Communication";
+
+// Artifact Storage — thin service with pluggable backend (local FS / S3).
+// Stores immutable deployment snapshots created by Snapper.
+// Processes calls GetSnapshot to retrieve the snapshot before sending it to Worker.
+service ArtifactStorageService {
+  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+}
+
+message GetSnapshotRequest {
+  string snapshot_key = 1;
+}
+
+message GetSnapshotResponse {
+  message Success {
+    string snapshot_key = 1;
+    bytes content = 2;
+    string content_type = 3;
+    int64 size_bytes = 4;
+    int64 created_at = 5;
+  }
+
+  message NotFoundError {
+    string snapshot_key = 1;
+    string message = 2;
+  }
+
+  message InternalError {
+    string message = 1;
+    optional string trace = 2;
+  }
+
+  oneof result {
+    Success success = 1;
+    NotFoundError not_found = 2;
+    InternalError internal_error = 3;
+  }
+}

@@ -1,0 +1,6 @@
+variables:
+  - name: BROKEN_VAR
+
+steps:
+  build:
+    script: echo $BROKEN_VAR

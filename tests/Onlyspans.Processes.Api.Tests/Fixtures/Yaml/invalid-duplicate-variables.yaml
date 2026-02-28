@@ -1,0 +1,9 @@
+variables:
+  - name: MY_VAR
+    value: first
+  - name: MY_VAR
+    value: second
+
+steps:
+  build:
+    script: echo $MY_VAR

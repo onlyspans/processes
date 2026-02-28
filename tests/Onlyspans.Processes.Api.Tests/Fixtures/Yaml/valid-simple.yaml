@@ -1,0 +1,5 @@
+steps:
+  build:
+    script: dotnet build
+  deploy:
+    script: kubectl apply -f manifests/deployment.yaml

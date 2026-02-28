@@ -1,0 +1,13 @@
+steps:
+  deploy-staging:
+    script: kubectl apply -f staging.yaml
+
+  approve:
+    type: approval
+    timeout: 12h
+    approvers:
+      - role: devops-lead
+
+  deploy-production:
+    script: kubectl apply -f production.yaml
+    on_failure: rollback

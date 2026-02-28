@@ -1,0 +1,52 @@
+variables:
+  - name: REPOSITORY_URL
+    value: https://git.company.ru/data-platform/billing-api.git
+  - name: DOCKER_REGISTRY
+    value: registry.company.ru/billing
+  - name: K8S_NAMESPACE
+    value: billing-prod
+  - name: MATTERMOST_WEBHOOK
+    source: secrets
+  - name: DEPLOY_TOKEN
+    source: secrets
+
+steps:
+  checkout-repo:
+    description: "Clone the repository"
+    script: git clone $REPOSITORY_URL /workspace/repo
+    on_failure: abort
+
+  build-api:
+    description: "Build API Docker image"
+    script: docker build -t ${DOCKER_REGISTRY}/api:latest /workspace/repo
+    on_failure: abort
+
+  build-front:
+    description: "Build frontend via external script"
+    script-path: ./scripts/build-front.sh
+    on_failure: abort
+
+  run-tests:
+    description: "Run tests (optional)"
+    script: dotnet test /workspace/repo/tests
+    optional: true
+    on_failure: continue
+
+  approve-production:
+    description: "Approval before production deployment"
+    type: approval
+    timeout: 24h
+    approvers:
+      - role: tech-lead
+      - user: ivanov@company.ru
+
+  deploy-api:
+    description: "Deploy API to Kubernetes"
+    script: kubectl apply -f /workspace/repo/manifests/api.yaml -n $K8S_NAMESPACE
+    on_failure: rollback
+
+  send-notification:
+    description: "Notify team"
+    script: "curl -X POST https://mm.company.ru/hooks/deploy -d '{\"text\": \"deployed\"}'"
+    optional: true
+    on_failure: continue

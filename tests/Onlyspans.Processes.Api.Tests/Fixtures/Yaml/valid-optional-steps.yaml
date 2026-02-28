@@ -1,0 +1,18 @@
+steps:
+  build:
+    script: dotnet build
+    on_failure: abort
+
+  test:
+    script: dotnet test
+    optional: true
+    on_failure: continue
+
+  lint:
+    script: dotnet format --verify-no-changes
+    optional: true
+    on_failure: continue
+
+  deploy:
+    script: kubectl apply -f deployment.yaml
+    on_failure: rollback

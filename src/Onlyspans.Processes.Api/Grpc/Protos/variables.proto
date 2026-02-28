@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package variables;
+
+option csharp_namespace = "Variables.Communication";
+
+service VariablesService {
+  rpc GetResolvedVariables(GetResolvedVariablesInput) returns (GetResolvedVariablesResult);
+  rpc ValidateProjectExists(ValidateProjectInput) returns (ValidationResult);
+  rpc ValidateEnvironmentExists(ValidateEnvironmentInput) returns (ValidationResult);
+}
+
+message GetResolvedVariablesInput {
+  string project_id = 1;
+  string environment_id = 2;
+}
+
+message GetResolvedVariablesResult {
+  message Success {
+    repeated Variable variables = 1;
+  }
+
+  message ConflictError {
+    string key = 1;
+    repeated string conflicting_sources = 2;
+  }
+
+  oneof result {
+    Success success = 1;
+    ConflictError conflict_error = 2;
+    InternalError internal_error = 3;
+  }
+}
+
+message Variable {
+  string key = 1;
+  string value = 2;
+  optional string environment_id = 3;
+  string source = 4;
+}
+
+message InternalError {
+  string message = 1;
+  string trace = 2;
+}
+
+message ValidateProjectInput {
+  string project_id = 1;
+}
+
+message ValidateEnvironmentInput {
+  string environment_id = 1;
+}
+
+message ValidationResult {
+  bool exists = 1;
+  string error_message = 2;
+}

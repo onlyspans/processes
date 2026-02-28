@@ -1,0 +1,7 @@
+steps:
+  build:
+    description: "Build via external script"
+    script-path: ./scripts/build.sh
+  deploy:
+    description: "Deploy via external script"
+    script-path: ./scripts/deploy.sh

@@ -1,0 +1,13 @@
+variables:
+  - name: REPO_URL
+    value: https://git.example.com/project.git
+  - name: IMAGE_TAG
+    value: v1.2.3
+
+steps:
+  clone:
+    script: git clone $REPO_URL /workspace
+  build:
+    script: docker build -t myapp:${IMAGE_TAG} .
+  push:
+    script: docker push myapp:$IMAGE_TAG

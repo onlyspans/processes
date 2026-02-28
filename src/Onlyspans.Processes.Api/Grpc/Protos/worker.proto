@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package worker;
+
+option csharp_namespace = "Worker.Communication";
+
+// Worker service receives deployment packages from Processes and streams logs back
+// Architecture reference: https://github.com/onlyspans/issues/blob/nikitakaralius/platform-arch/arch/target-arch.md
+// Error handling pattern copied from: /variables/src/Onlyspans.Variables.Api/gRPC/Protos/variables.proto (lines 22-48)
+service WorkerService {
+  // Called by Processes to execute deployment on target
+  // Returns server stream of deployment messages (logs during execution, final result at end)
+  rpc ExecuteDeployment(DeploymentPackage) returns (stream DeploymentMessage);
+}
+
+// Streaming response message - can be either a log chunk OR final result
+// Pattern: Send log chunks during execution, then final result to signal completion
+message DeploymentMessage {
+  oneof message {
+    LogChunk log = 1;
+    DeploymentResult result = 2;
+  }
+}
+
+// Deployment package received from Processes service
+// Contains pre-resolved variables (secrets already resolved by Processes)
+message DeploymentPackage {
+  string deployment_id = 1;
+  string project_id = 2;
+  string environment_id = 3;
+  string target_id = 4;
+  string snapshot_key = 5;  // S3 key for deployment snapshot
+  map<string, string> resolved_variables = 6;  // Pre-resolved by Processes (includes secrets)
+  string target_type = 7;  // "ssh", "kubernetes", etc.
+}
+
+// Log chunk streamed to Processes during deployment
+message LogChunk {
+  string deployment_id = 1;
+  int64 timestamp = 2;  // Unix timestamp in milliseconds
+  LogLevel level = 3;
+  string message = 4;
+  optional string source = 5;  // "worker", "target-controller", "target-agent"
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  LOG_LEVEL_DEBUG = 1;
+  LOG_LEVEL_INFO = 2;
+  LOG_LEVEL_WARNING = 3;
+  LOG_LEVEL_ERROR = 4;
+}
+
+// Final deployment result - sent as last message in stream to signal completion
+message DeploymentResult {
+  message Success {
+    string deployment_id = 1;
+    int64 completed_at = 2;  // Unix timestamp in milliseconds
+    string summary = 3;
+  }
+
+  message Error {
+    string deployment_id = 1;
+    ErrorType error_type = 2;
+    string message = 3;
+    optional string trace = 4;  // Stack trace or detailed error info
+  }
+
+  // Pattern copied from variables.proto (lines 31-35)
+  oneof result {
+    Success success = 1;
+    Error error = 2;
+  }
+}
+
+enum ErrorType {
+  ERROR_TYPE_UNSPECIFIED = 0;
+  ERROR_TYPE_SNAPSHOT_DOWNLOAD_FAILED = 1;
+  ERROR_TYPE_TARGET_EXECUTION_FAILED = 2;
+  ERROR_TYPE_INTERNAL = 3;
+}
