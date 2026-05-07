@@ -26,11 +26,6 @@ public sealed class DeploymentService(
     IDeploymentLogWriter logWriter,
     ILogger<DeploymentService> logger)
 {
-    /// <summary>
-    /// Executes a full deployment: iterates pipeline steps using FSM,
-    /// sends each step's package to Worker, reads the log stream,
-    /// and updates step/process status in DB.
-    /// </summary>
     public async Task<DeploymentResponse> ExecuteAsync(
         Guid processId,
         string targetId,
@@ -134,7 +129,29 @@ public sealed class DeploymentService(
             }
         }
 
-        if (fsm.CurrentState == PipelineStateMachine.StateCompleted)
+        if (fsm.CurrentState == PipelineStateMachine.StateRollingBack)
+        {
+            process.Status = ProcessStatus.RollingBack;
+            await db.SaveChangesAsync(ct);
+
+            var rollbackSucceeded = await ExecuteRollbackAsync(
+                deploymentId, orderedSteps, targetId, targetType,
+                resolvedSnapshotKey, resolvedVariables, process, ct);
+
+            if (rollbackSucceeded)
+            {
+                fsm.RollbackCompleted();
+                process.Status = ProcessStatus.RolledBack;
+            }
+            else
+            {
+                fsm.RollbackFailed();
+                process.Status = ProcessStatus.Failed;
+            }
+
+            process.CompletedAt = DateTimeOffset.UtcNow;
+        }
+        else if (fsm.CurrentState == PipelineStateMachine.StateCompleted)
         {
             process.Status = ProcessStatus.Completed;
             process.CompletedAt = completedAt ?? DateTimeOffset.UtcNow;
@@ -170,6 +187,49 @@ public sealed class DeploymentService(
             DeploymentId = deploymentId,
             Entries      = entries,
         };
+    }
+
+    private async Task<bool> ExecuteRollbackAsync(
+        Guid deploymentId,
+        List<ProcessStep> orderedSteps,
+        string targetId,
+        string targetType,
+        string snapshotKey,
+        Dictionary<string, string> resolvedVariables,
+        DeploymentProcess process,
+        CancellationToken ct)
+    {
+        var completedSteps = orderedSteps
+            .Where(s => s.Status == StepStatus.Succeeded)
+            .OrderByDescending(s => s.Order)
+            .ToList();
+
+        foreach (var step in completedSteps)
+        {
+            if (string.IsNullOrWhiteSpace(step.Script) &&
+                string.IsNullOrWhiteSpace(step.ScriptPath))
+                continue;
+
+            logger.LogInformation(
+                "Rolling back step '{StepName}' for deployment {DeploymentId}",
+                step.Name, deploymentId);
+
+            var package = BuildDeploymentPackage(
+                deploymentId, process, step,
+                targetId, targetType, snapshotKey, resolvedVariables);
+
+            var result = await ExecuteStepAsync(deploymentId, package, ct);
+
+            if (!result.Success)
+            {
+                logger.LogError(
+                    "Rollback of step '{StepName}' failed: {Error}",
+                    step.Name, result.ErrorMessage);
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private async Task<StepExecutionResult> ExecuteStepAsync(
@@ -264,19 +324,23 @@ public sealed class DeploymentService(
             "Resolving snapshot {SnapshotKey} from ArtifactStorage for deployment {DeploymentId}",
             snapshotKey, deploymentId);
 
-        var result = await artifactStorageService.GetSnapshotAsync(snapshotKey, ct);
+        var parts = snapshotKey.Split('@', 2);
+        var key = parts[0];
+        var version = parts.Length > 1 ? parts[1] : snapshotKey;
+
+        var result = await artifactStorageService.GetSnapshotInfoAsync(key, version, ct);
 
         switch (result)
         {
             case SnapshotResult.Ok ok:
                 logger.LogInformation(
-                    "Snapshot {SnapshotKey} resolved: {SizeBytes} bytes, type={ContentType}",
-                    ok.SnapshotKey, ok.SizeBytes, ok.ContentType);
-                return ok.SnapshotKey;
+                    "Snapshot {Key}@{Version} resolved: {SizeBytes} bytes, type={ContentType}",
+                    ok.Key, ok.Version, ok.SizeBytes, ok.ContentType);
+                return snapshotKey;
 
             case SnapshotResult.NotFound notFound:
                 throw new InvalidOperationException(
-                    $"Snapshot '{notFound.SnapshotKey}' not found in ArtifactStorage: {notFound.Message}");
+                    $"Snapshot '{notFound.Key}@{notFound.Version}' not found in ArtifactStorage: {notFound.Message}");
 
             case SnapshotResult.Error error:
                 throw new InvalidOperationException(

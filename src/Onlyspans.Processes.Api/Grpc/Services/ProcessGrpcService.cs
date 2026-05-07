@@ -156,14 +156,14 @@ public sealed class ProcessGrpcService(
                 {
                     Name        = s.Name,
                     Order       = s.Order,
-                    Description = s.Description,
+                    Description = s.Description ?? string.Empty,
                     Type        = s.Type,
-                    Script      = s.Script,
-                    ScriptPath  = s.ScriptPath,
+                    Script      = s.Script ?? string.Empty,
+                    ScriptPath  = s.ScriptPath ?? string.Empty,
                     Optional    = s.Optional,
                     Blocking    = s.Blocking,
-                    OnFailure   = s.OnFailure,
-                    Timeout     = s.Timeout,
+                    OnFailure   = s.OnFailure ?? string.Empty,
+                    Timeout     = s.Timeout ?? string.Empty,
                 }));
             }
 
@@ -277,14 +277,14 @@ public sealed class ProcessGrpcService(
             Id          = s.Id.ToString(),
             Name        = s.Name,
             Order       = s.Order,
-            Description = s.Description,
+            Description = s.Description ?? string.Empty,
             Type        = s.Type,
-            Script      = s.Script,
-            ScriptPath  = s.ScriptPath,
+            Script      = s.Script ?? string.Empty,
+            ScriptPath  = s.ScriptPath ?? string.Empty,
             Optional    = s.Optional,
             Blocking    = s.Blocking,
             OnFailure   = s.OnFailure,
-            Timeout     = s.Timeout,
+            Timeout     = s.Timeout ?? string.Empty,
             Status      = s.Status,
         }));
 

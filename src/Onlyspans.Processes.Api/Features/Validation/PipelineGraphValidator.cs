@@ -9,14 +9,18 @@ namespace Onlyspans.Processes.Api.Features.Validation;
 /// </summary>
 public sealed class PipelineGraphValidator
 {
-    private const string StateNotStarted = "__not_started__";
-    private const string StateCompleted  = "__completed__";
-    private const string StateFailed     = "__failed__";
+    private const string StateNotStarted  = "__not_started__";
+    private const string StateCompleted   = "__completed__";
+    private const string StateFailed      = "__failed__";
+    private const string StateRollingBack = "__rolling_back__";
+    private const string StateRolledBack  = "__rolled_back__";
 
     private const string TriggerStart        = "Start";
     private const string TriggerStepSuccess  = "StepSucceeded";
     private const string TriggerStepFailed   = "StepFailed";
-    private const string TriggerStepSkipped  = "StepSkipped";
+    private const string TriggerStepSkipped        = "StepSkipped";
+    private const string TriggerRollbackCompleted = "RollbackCompleted";
+    private const string TriggerRollbackFailed    = "RollbackFailed";
 
     public async Task<PipelineValidationResult> ValidateAsync(ProcessDefinition definition)
     {
@@ -49,9 +53,11 @@ public sealed class PipelineGraphValidator
     {
         var graph = new Dictionary<string, HashSet<string>>();
 
-        graph[StateNotStarted] = [steps[0].Name];
-        graph[StateCompleted]  = [];
-        graph[StateFailed]     = [];
+        graph[StateNotStarted]  = [steps[0].Name];
+        graph[StateCompleted]   = [];
+        graph[StateFailed]      = [];
+        graph[StateRollingBack] = [StateRolledBack, StateFailed];
+        graph[StateRolledBack]  = [];
 
         for (var i = 0; i < steps.Count; i++)
         {
@@ -63,7 +69,7 @@ public sealed class PipelineGraphValidator
             var onFailure = (def.OnFailure?.ToLowerInvariant()) switch
             {
                 "continue" => next,
-                "rollback" => StateFailed,
+                "rollback" => StateRollingBack,
                 _          => StateFailed,
             };
             edges.Add(onFailure);
@@ -143,7 +149,12 @@ public sealed class PipelineGraphValidator
                 var config = machine.Configure(name);
                 config.Permit(TriggerStepSuccess, next);
 
-                var failTarget = def.OnFailure?.ToLowerInvariant() == "continue" ? next : StateFailed;
+                var failTarget = def.OnFailure?.ToLowerInvariant() switch
+                {
+                    "continue" => next,
+                    "rollback" => StateRollingBack,
+                    _          => StateFailed,
+                };
 
                 if (failTarget != next)
                     config.Permit(TriggerStepFailed, failTarget);
@@ -157,8 +168,13 @@ public sealed class PipelineGraphValidator
                 }
             }
 
+            machine.Configure(StateRollingBack)
+                .Permit(TriggerRollbackCompleted, StateRolledBack)
+                .Permit(TriggerRollbackFailed, StateFailed);
+
             machine.Configure(StateCompleted);
             machine.Configure(StateFailed);
+            machine.Configure(StateRolledBack);
 
             machine.Fire(TriggerStart);
             var permittedAfterStart = (await machine.GetPermittedTriggersAsync()).ToList();

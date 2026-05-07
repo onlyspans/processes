@@ -21,6 +21,8 @@ public static class YamlFixture
     public static string ValidWithApproval      => Load("valid-with-approval.yaml");
     public static string ValidWithScriptPath    => Load("valid-with-script-path.yaml");
     public static string ValidOptionalSteps     => Load("valid-optional-steps.yaml");
+    public static string ValidContinueThenSucceed => Load("valid-continue-then-succeed.yaml");
+    public static string ValidRollback            => Load("valid-rollback.yaml");
 
     public static string InvalidNoSteps                  => Load("invalid-no-steps.yaml");
     public static string InvalidEmptySteps               => Load("invalid-empty-steps.yaml");

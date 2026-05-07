@@ -4,41 +4,216 @@ package artifactstorage;
 
 option csharp_namespace = "ArtifactStorage.Communication";
 
+import "google/protobuf/timestamp.proto";
+
 // Artifact Storage — thin service with pluggable backend (local FS / S3).
-// Stores immutable deployment snapshots created by Snapper.
-// Processes calls GetSnapshot to retrieve the snapshot before sending it to Worker.
+// Stores immutable artifacts (raw files from Agents) and snapshots (release packages from Snapper).
 
-// TODO prolly need to rework
 service ArtifactStorageService {
-  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+
+  // ── Artifacts (raw files uploaded by Agents) ───────────────
+  rpc UploadArtifact   (stream UploadArtifactRequest)  returns (UploadArtifactResponse);
+  rpc DownloadArtifact (DownloadArtifactRequest)        returns (stream DownloadArtifactResponse);
+  rpc GetArtifactInfo  (GetArtifactInfoRequest)         returns (GetArtifactInfoResponse);
+  rpc ListArtifacts    (ListArtifactsRequest)            returns (ListArtifactsResponse);
+
+  // ── Snapshots (immutable release packages from Snapper) ────
+  rpc UploadSnapshot   (stream UploadSnapshotRequest)  returns (UploadSnapshotResponse);
+  rpc DownloadSnapshot (DownloadSnapshotRequest)        returns (stream DownloadSnapshotResponse);
+  rpc GetSnapshotInfo  (GetSnapshotInfoRequest)         returns (GetSnapshotInfoResponse);
+  rpc ListSnapshots    (ListSnapshotsRequest)            returns (ListSnapshotsResponse);
 }
 
-message GetSnapshotRequest {
-  string snapshot_key = 1;
+// ═══════════════════════════════════════════════════════════════
+//  Common
+// ═══════════════════════════════════════════════════════════════
+
+message ErrorResult {
+  string code    = 1;
+  string message = 2;
+  optional string trace = 3;
 }
 
-message GetSnapshotResponse {
-  message Success {
-    string snapshot_key = 1;
-    bytes content = 2;
-    string content_type = 3;
-    int64 size_bytes = 4;
-    int64 created_at = 5;
-  }
+// ═══════════════════════════════════════════════════════════════
+//  Artifacts
+// ═══════════════════════════════════════════════════════════════
 
-  message NotFoundError {
-    string snapshot_key = 1;
-    string message = 2;
-  }
+// ── Upload (client-streaming) ────────────────────────────────
+// First message MUST contain header; all subsequent — chunk data.
 
-  message InternalError {
-    string message = 1;
-    optional string trace = 2;
+message UploadArtifactRequest {
+  oneof payload {
+    ArtifactUploadHeader header = 1;
+    bytes chunk                 = 2;
   }
+}
 
+message ArtifactUploadHeader {
+  string key          = 1;
+  string version      = 2;
+  string content_type = 3;
+  map<string, string> labels = 4;
+}
+
+message UploadArtifactResponse {
   oneof result {
-    Success success = 1;
-    NotFoundError not_found = 2;
-    InternalError internal_error = 3;
+    ArtifactInfo success = 1;
+    ErrorResult  error   = 2;
   }
+}
+
+// ── Download (server-streaming) ──────────────────────────────
+// First response contains header metadata; subsequent — chunk data.
+
+message DownloadArtifactRequest {
+  string key     = 1;
+  string version = 2;
+}
+
+message DownloadArtifactResponse {
+  oneof payload {
+    ArtifactInfo header = 1;
+    bytes chunk         = 2;
+  }
+}
+
+// ── GetArtifactInfo (unary) ──────────────────────────────────
+
+message GetArtifactInfoRequest {
+  string key     = 1;
+  string version = 2;
+}
+
+message GetArtifactInfoResponse {
+  oneof result {
+    ArtifactInfo success = 1;
+    ErrorResult  error   = 2;
+  }
+}
+
+// ── ListArtifacts (unary) ────────────────────────────────────
+
+message ListArtifactsRequest {
+  optional string key_prefix = 1;
+  map<string, string> label_filter = 2;
+  int32  page_size  = 3;
+  string page_token = 4;
+}
+
+message ListArtifactsResponse {
+  oneof result {
+    ArtifactList success = 1;
+    ErrorResult  error   = 2;
+  }
+}
+
+message ArtifactList {
+  repeated ArtifactInfo items = 1;
+  string next_page_token      = 2;
+  int32  total_count           = 3;
+}
+
+// ── Shared ───────────────────────────────────────────────────
+
+message ArtifactInfo {
+  string id                            = 1;
+  string key                           = 2;
+  string version                       = 3;
+  string content_type                  = 4;
+  int64  size_bytes                    = 5;
+  string checksum_sha256               = 6;
+  google.protobuf.Timestamp created_at = 7;
+  map<string, string> labels           = 8;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Snapshots
+// ═══════════════════════════════════════════════════════════════
+
+// ── Upload (client-streaming) ────────────────────────────────
+
+message UploadSnapshotRequest {
+  oneof payload {
+    SnapshotUploadHeader header = 1;
+    bytes chunk                 = 2;
+  }
+}
+
+message SnapshotUploadHeader {
+  string key          = 1;
+  string version      = 2;
+  string content_type = 3;
+  repeated string artifact_ids = 4;
+  map<string, string> labels   = 5;
+}
+
+message UploadSnapshotResponse {
+  oneof result {
+    SnapshotInfo success = 1;
+    ErrorResult  error   = 2;
+  }
+}
+
+// ── Download (server-streaming) ──────────────────────────────
+
+message DownloadSnapshotRequest {
+  string key     = 1;
+  string version = 2;
+}
+
+message DownloadSnapshotResponse {
+  oneof payload {
+    SnapshotInfo header = 1;
+    bytes chunk         = 2;
+  }
+}
+
+// ── GetSnapshotInfo (unary) ──────────────────────────────────
+
+message GetSnapshotInfoRequest {
+  string key     = 1;
+  string version = 2;
+}
+
+message GetSnapshotInfoResponse {
+  oneof result {
+    SnapshotInfo success = 1;
+    ErrorResult  error   = 2;
+  }
+}
+
+// ── ListSnapshots (unary) ────────────────────────────────────
+
+message ListSnapshotsRequest {
+  optional string key_prefix = 1;
+  map<string, string> label_filter = 2;
+  int32  page_size  = 3;
+  string page_token = 4;
+}
+
+message ListSnapshotsResponse {
+  oneof result {
+    SnapshotList success = 1;
+    ErrorResult  error   = 2;
+  }
+}
+
+message SnapshotList {
+  repeated SnapshotInfo items = 1;
+  string next_page_token      = 2;
+  int32  total_count           = 3;
+}
+
+// ── Shared ───────────────────────────────────────────────────
+
+message SnapshotInfo {
+  string id                            = 1;
+  string key                           = 2;
+  string version                       = 3;
+  string content_type                  = 4;
+  int64  size_bytes                    = 5;
+  string checksum_sha256               = 6;
+  google.protobuf.Timestamp created_at = 7;
+  repeated string artifact_ids         = 8;
+  map<string, string> labels           = 9;
 }

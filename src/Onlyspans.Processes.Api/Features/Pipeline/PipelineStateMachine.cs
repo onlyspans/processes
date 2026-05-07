@@ -9,16 +9,18 @@ namespace Onlyspans.Processes.Api.Features.Pipeline;
 /// </summary>
 public sealed class PipelineStateMachine
 {
-    public const string StateNotStarted = "__not_started__";
-    public const string StateCompleted  = "__completed__";
-    public const string StateFailed     = "__failed__";
+    public const string StateNotStarted  = "__not_started__";
+    public const string StateCompleted   = "__completed__";
+    public const string StateFailed      = "__failed__";
+    public const string StateRollingBack = "__rolling_back__";
+    public const string StateRolledBack  = "__rolled_back__";
 
     private readonly StateMachine<string, string> _machine;
     private readonly List<(string Name, StepDefinition Definition, int Order)> _steps;
     private string _currentState;
 
     public string CurrentState => _currentState;
-    public bool IsTerminal => _currentState is StateCompleted or StateFailed;
+    public bool IsTerminal => _currentState is StateCompleted or StateFailed or StateRolledBack;
 
     public PipelineStateMachine(List<(string Name, StepDefinition Definition, int Order)> steps)
     {
@@ -33,6 +35,8 @@ public sealed class PipelineStateMachine
     public void StepSucceeded() => _machine.Fire(Trigger.StepSucceeded);
     public void StepFailed() => _machine.Fire(Trigger.StepFailed);
     public void StepSkipped() => _machine.Fire(Trigger.StepSkipped);
+    public void RollbackCompleted() => _machine.Fire(Trigger.RollbackCompleted);
+    public void RollbackFailed() => _machine.Fire(Trigger.RollbackFailed);
 
     public async Task<IEnumerable<string>> GetPermittedTriggersAsync() =>
         await _machine.GetPermittedTriggersAsync();
@@ -56,15 +60,25 @@ public sealed class PipelineStateMachine
             var config = _machine.Configure(name);
             config.Permit(Trigger.StepSucceeded, next);
 
-            var failTarget = def.OnFailure?.ToLowerInvariant() == "continue" ? next : StateFailed;
+            var failTarget = def.OnFailure?.ToLowerInvariant() switch
+            {
+                "continue" => next,
+                "rollback" => StateRollingBack,
+                _          => StateFailed,
+            };
             config.Permit(Trigger.StepFailed, failTarget);
 
             if (def.Optional)
                 config.Permit(Trigger.StepSkipped, next);
         }
 
+        _machine.Configure(StateRollingBack)
+            .Permit(Trigger.RollbackCompleted, StateRolledBack)
+            .Permit(Trigger.RollbackFailed, StateFailed);
+
         _machine.Configure(StateCompleted);
         _machine.Configure(StateFailed);
+        _machine.Configure(StateRolledBack);
     }
 
     public static class Trigger
@@ -72,6 +86,8 @@ public sealed class PipelineStateMachine
         public const string Start        = "Start";
         public const string StepSucceeded = "StepSucceeded";
         public const string StepFailed   = "StepFailed";
-        public const string StepSkipped  = "StepSkipped";
+        public const string StepSkipped        = "StepSkipped";
+        public const string RollbackCompleted = "RollbackCompleted";
+        public const string RollbackFailed    = "RollbackFailed";
     }
 }

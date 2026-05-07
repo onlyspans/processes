@@ -115,7 +115,7 @@ public sealed class PipelineStateMachineTests
     }
 
     [Fact]
-    public void StepFailed_WithRollback_TransitionsToFailed()
+    public void StepFailed_WithRollback_TransitionsToRollingBack()
     {
         // Arrange
         var steps = CreateSteps(("deploy", "rollback", false));
@@ -126,7 +126,42 @@ public sealed class PipelineStateMachineTests
         fsm.StepFailed();
 
         // Assert
+        fsm.CurrentState.Should().Be(PipelineStateMachine.StateRollingBack);
+        fsm.IsTerminal.Should().BeFalse();
+    }
+
+    [Fact]
+    public void RollbackCompleted_FromRollingBack_TransitionsToRolledBack()
+    {
+        // Arrange
+        var steps = CreateSteps(("deploy", "rollback", false));
+        var fsm = new PipelineStateMachine(steps);
+        fsm.Start();
+        fsm.StepFailed();
+
+        // Act
+        fsm.RollbackCompleted();
+
+        // Assert
+        fsm.CurrentState.Should().Be(PipelineStateMachine.StateRolledBack);
+        fsm.IsTerminal.Should().BeTrue();
+    }
+
+    [Fact]
+    public void RollbackFailed_FromRollingBack_TransitionsToFailed()
+    {
+        // Arrange
+        var steps = CreateSteps(("deploy", "rollback", false));
+        var fsm = new PipelineStateMachine(steps);
+        fsm.Start();
+        fsm.StepFailed();
+
+        // Act
+        fsm.RollbackFailed();
+
+        // Assert
         fsm.CurrentState.Should().Be(PipelineStateMachine.StateFailed);
+        fsm.IsTerminal.Should().BeTrue();
     }
 
     [Fact]

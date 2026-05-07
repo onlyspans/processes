@@ -1,0 +1,9 @@
+steps:
+  risky:
+    description: "Step that fails but pipeline continues"
+    script: "echo risky"
+    on_failure: continue
+
+  cleanup:
+    description: "Follow-up step that must still run after risky"
+    script: "echo cleanup"

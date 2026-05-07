@@ -1,0 +1,9 @@
+steps:
+  deploy-staging:
+    description: "Deploy to staging (will succeed)"
+    script: "echo staging"
+
+  deploy-prod:
+    description: "Deploy to production (will fail and trigger rollback)"
+    script: "echo prod"
+    on_failure: rollback
