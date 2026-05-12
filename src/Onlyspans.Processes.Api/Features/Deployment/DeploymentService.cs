@@ -246,31 +246,41 @@ public sealed class DeploymentService(
         {
             using var call = workerService.ExecuteStep(ct);
 
-            await call.RequestStream.WriteAsync(
-                new StepExecutionInput { Metadata = metadata });
+            // Read the response on a background path so HTTP/2 window updates are
+            // consumed while large artifact uploads are still being written (avoids
+            // write/read flow-control deadlocks on duplex streams).
+            var readerTask = Task.Run(
+                () => ConsumeStepResponseStreamAsync(deploymentId, call.ResponseStream, ct),
+                ct);
 
-            await StreamArtifactChunksAsync(call.RequestStream, snapshotBytes, ct);
-
-            await call.RequestStream.CompleteAsync();
-
-            await foreach (var msg in call.ResponseStream.ReadAllAsync(ct))
+            try
             {
-                switch (msg.MessageCase)
-                {
-                    case StepExecutionMessage.MessageOneofCase.Log:
-                        await AppendLogAsync(deploymentId, msg.Log, ct);
-                        break;
+                await call.RequestStream.WriteAsync(
+                    new StepExecutionInput { Metadata = metadata });
 
-                    case StepExecutionMessage.MessageOneofCase.Result:
-                        return MapResult(msg.Result);
-                }
+                await StreamArtifactChunksAsync(call.RequestStream, snapshotBytes, ct);
+
+                await call.RequestStream.CompleteAsync();
+
+                return await readerTask.ConfigureAwait(false);
             }
-
-            return new StepOutcome
+            catch
             {
-                Success      = false,
-                ErrorMessage = "Worker stream ended without a result message",
-            };
+                try
+                {
+                    await readerTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Prefer the writer-side exception; the reader often surfaces the same RpcException.
+                }
+
+                throw;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -291,6 +301,31 @@ public sealed class DeploymentService(
                 ErrorTypeName = nameof(ErrorType.Internal),
             };
         }
+    }
+
+    private async Task<StepOutcome> ConsumeStepResponseStreamAsync(
+        Guid deploymentId,
+        global::Grpc.Core.IAsyncStreamReader<StepExecutionMessage> responseStream,
+        CancellationToken ct)
+    {
+        await foreach (var msg in responseStream.ReadAllAsync(ct))
+        {
+            switch (msg.MessageCase)
+            {
+                case StepExecutionMessage.MessageOneofCase.Log:
+                    await AppendLogAsync(deploymentId, msg.Log, ct);
+                    break;
+
+                case StepExecutionMessage.MessageOneofCase.Result:
+                    return MapResult(msg.Result);
+            }
+        }
+
+        return new StepOutcome
+        {
+            Success      = false,
+            ErrorMessage = "Worker stream ended without a result message",
+        };
     }
 
     private static async Task StreamArtifactChunksAsync(
