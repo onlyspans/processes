@@ -18,13 +18,13 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     private const string TargetId = "staging-cluster-1";
     private const string TargetType = "kubernetes";
     private const string SnapshotKey = "snapshots/project-abc/v1.0.0.tar.gz";
+    private static readonly byte[] DefaultSnapshotBytes = [0x01, 0x02, 0x03, 0x04];
 
     [Fact]
     public async Task ExecuteAsync_AllStepsSucceed_ProcessMarkedAsCompleted()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
-        var mockWorker = CreateMockWorkerWithSuccessResponse("All steps completed");
+        var (mockWorker, _) = CreateMockWorker(SuccessMessages("All steps completed"));
 
         await using var app = await CreateSubject(postconfigure: builder =>
         {
@@ -39,11 +39,9 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         var created = await processService.CreateAsync(
             projectId, EnvironmentId, "1.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
 
-        // Act
         var result = await deploymentService.ExecuteAsync(
             created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
-        // Assert
         result.Status.Should().Be("Completed");
         result.ProcessId.Should().Be(created.Id);
         result.DeploymentId.Should().NotBeEmpty();
@@ -55,9 +53,8 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     [Fact]
     public async Task ExecuteAsync_AllStepsSucceed_StepsMarkedAsSucceededInDb()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
-        var mockWorker = CreateMockWorkerWithSuccessResponse("Done");
+        var (mockWorker, _) = CreateMockWorker(SuccessMessages("Done"));
 
         await using var app = await CreateSubject(postconfigure: builder =>
         {
@@ -72,11 +69,9 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         var created = await processService.CreateAsync(
             projectId, EnvironmentId, "2.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
 
-        // Act
         await deploymentService.ExecuteAsync(
             created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
-        // Assert
         var process = await processService.GetByIdAsync(created.Id, ct: cancellationToken);
         process.Should().NotBeNull();
         process!.Steps.Should().OnlyContain(s => s.Status == "Succeeded");
@@ -85,10 +80,9 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     [Fact]
     public async Task ExecuteAsync_StepFails_ProcessMarkedAsFailed()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
-        var mockWorker = CreateMockWorkerWithErrorResponse(
-            "Build failed", ErrorType.TargetExecutionFailed);
+        var (mockWorker, _) = CreateMockWorker(
+            ErrorMessages("Build failed", ErrorType.TargetExecutionFailed));
 
         await using var app = await CreateSubject(postconfigure: builder =>
         {
@@ -103,11 +97,9 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         var created = await processService.CreateAsync(
             projectId, EnvironmentId, "3.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
 
-        // Act
         var result = await deploymentService.ExecuteAsync(
             created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
-        // Assert
         result.Status.Should().Be("Failed");
         result.ErrorMessage.Should().Be("Build failed");
         result.ErrorType.Should().Contain("TargetExecutionFailed");
@@ -116,11 +108,10 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     [Fact]
     public async Task ExecuteAsync_StepFailsWithContinue_ProcessMarkedAsCompleted()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
-        var mockWorker = CreateMockWorkerWithSequencedResponses(
-            [CreateErrorResultMessage("risky failed", ErrorType.TargetExecutionFailed)],
-            [CreateSuccessResultMessage("cleanup done")]);
+        var (mockWorker, _) = CreateMockWorker(
+            ErrorMessages("risky failed", ErrorType.TargetExecutionFailed),
+            SuccessMessages("cleanup done"));
 
         await using var app = await CreateSubject(postconfigure: builder =>
         {
@@ -136,11 +127,9 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
             projectId, EnvironmentId, "8.0.0",
             YamlFixture.ValidContinueThenSucceed, ct: cancellationToken);
 
-        // Act
         var result = await deploymentService.ExecuteAsync(
             created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
-        // Assert
         result.Status.Should().Be("Completed");
 
         var process = await processService.GetByIdAsync(created.Id, ct: cancellationToken);
@@ -154,12 +143,11 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     [Fact]
     public async Task ExecuteAsync_StepFailsWithRollback_ProcessMarkedAsRolledBack()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
-        var mockWorker = CreateMockWorkerWithSequencedResponses(
-            [CreateSuccessResultMessage("staging ok")],
-            [CreateErrorResultMessage("prod failed", ErrorType.TargetExecutionFailed)],
-            [CreateSuccessResultMessage("staging rolled back")]);
+        var (mockWorker, _) = CreateMockWorker(
+            SuccessMessages("staging ok"),
+            ErrorMessages("prod failed", ErrorType.TargetExecutionFailed),
+            SuccessMessages("staging rolled back"));
 
         await using var app = await CreateSubject(postconfigure: builder =>
         {
@@ -175,11 +163,9 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
             projectId, EnvironmentId, "9.0.0",
             YamlFixture.ValidRollback, ct: cancellationToken);
 
-        // Act
         var result = await deploymentService.ExecuteAsync(
             created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
-        // Assert
         result.Status.Should().Be("RolledBack");
 
         var process = await processService.GetByIdAsync(created.Id, ct: cancellationToken);
@@ -193,9 +179,8 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     [Fact]
     public async Task ExecuteAsync_WorkerStreamsLogs_LogsWrittenToFile()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
-        var logMessages = new List<DeploymentMessage>
+        var responses = new List<StepExecutionMessage>
         {
             CreateLogMessage("Starting build...", LogLevel.Info),
             CreateLogMessage("Compiling source...", LogLevel.Info),
@@ -203,11 +188,7 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
             CreateSuccessResultMessage("Build succeeded"),
         };
 
-        var mockWorker = Substitute.For<WorkerGrpcService>(
-            Substitute.For<WorkerService.WorkerServiceClient>());
-        mockWorker
-            .ExecuteDeployment(Arg.Any<DeploymentPackage>(), Arg.Any<CancellationToken>())
-            .Returns(_ => FakeGrpcStreamHelper.CreateServerStreamingCall(logMessages));
+        var (mockWorker, _) = CreateMockWorker(responses);
 
         await using var app = await CreateSubject(postconfigure: builder =>
         {
@@ -222,13 +203,11 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         var created = await processService.CreateAsync(
             projectId, EnvironmentId, "4.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
 
-        // Act
         var result = await deploymentService.ExecuteAsync(
             created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
         var logs = await deploymentService.GetLogsAsync(result.DeploymentId, ct: cancellationToken);
 
-        // Assert
         logs.DeploymentId.Should().Be(result.DeploymentId);
         logs.Entries.Should().HaveCountGreaterOrEqualTo(3);
         logs.Entries.Should().Contain(e => e.Message == "Starting build...");
@@ -239,9 +218,8 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     [Fact]
     public async Task ExecuteAsync_ApprovalStep_ReturnsAwaitingApproval()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
-        var mockWorker = CreateMockWorkerWithSuccessResponse("Done");
+        var (mockWorker, _) = CreateMockWorker(SuccessMessages("Done"));
 
         await using var app = await CreateSubject(postconfigure: builder =>
         {
@@ -256,20 +234,17 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         var created = await processService.CreateAsync(
             projectId, EnvironmentId, "5.0.0", YamlFixture.ValidWithApproval, ct: cancellationToken);
 
-        // Act
         var result = await deploymentService.ExecuteAsync(
             created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
-        // Assert
         result.Status.Should().Be("AwaitingApproval");
     }
 
     [Fact]
     public async Task ExecuteAsync_NonExistentProcess_ThrowsException()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
-        var mockWorker = CreateMockWorkerWithSuccessResponse("Done");
+        var (mockWorker, _) = CreateMockWorker(SuccessMessages("Done"));
 
         await using var app = await CreateSubject(postconfigure: builder =>
         {
@@ -279,11 +254,9 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         using var scope = app.Services.CreateScope();
         var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
 
-        // Act
         var act = async () => await deploymentService.ExecuteAsync(
             Guid.NewGuid(), TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
-        // Assert
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not found*");
     }
@@ -291,12 +264,11 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     [Fact]
     public async Task ExecuteAsync_WorkerThrowsException_ProcessMarkedAsFailed()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
         var mockWorker = Substitute.For<WorkerGrpcService>(
             Substitute.For<WorkerService.WorkerServiceClient>());
         mockWorker
-            .ExecuteDeployment(Arg.Any<DeploymentPackage>(), Arg.Any<CancellationToken>())
+            .ExecuteStep(Arg.Any<CancellationToken>())
             .Returns(_ => throw new global::Grpc.Core.RpcException(
                 new global::Grpc.Core.Status(global::Grpc.Core.StatusCode.Unavailable, "Worker unreachable")));
 
@@ -313,11 +285,9 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         var created = await processService.CreateAsync(
             projectId, EnvironmentId, "6.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
 
-        // Act
         var result = await deploymentService.ExecuteAsync(
             created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
-        // Assert
         result.Status.Should().Be("Failed");
         result.ErrorMessage.Should().Contain("Worker unreachable");
     }
@@ -325,12 +295,11 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     [Fact]
     public async Task ExecuteAsync_WorkerThrowsException_ErrorLogWritten()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
         var mockWorker = Substitute.For<WorkerGrpcService>(
             Substitute.For<WorkerService.WorkerServiceClient>());
         mockWorker
-            .ExecuteDeployment(Arg.Any<DeploymentPackage>(), Arg.Any<CancellationToken>())
+            .ExecuteStep(Arg.Any<CancellationToken>())
             .Returns(_ => throw new global::Grpc.Core.RpcException(
                 new global::Grpc.Core.Status(global::Grpc.Core.StatusCode.Internal, "Internal error")));
 
@@ -347,13 +316,11 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         var created = await processService.CreateAsync(
             projectId, EnvironmentId, "7.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
 
-        // Act
         var result = await deploymentService.ExecuteAsync(
             created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
 
         var logs = await deploymentService.GetLogsAsync(result.DeploymentId, ct: cancellationToken);
 
-        // Assert
         logs.Entries.Should().Contain(e =>
             e.Level == "ERROR" && e.Source == "processes");
     }
@@ -361,9 +328,8 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     [Fact]
     public async Task GetLogsAsync_NoLogs_ReturnsEmptyEntries()
     {
-        // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
-        var mockWorker = CreateMockWorkerWithSuccessResponse("Done");
+        var (mockWorker, _) = CreateMockWorker(SuccessMessages("Done"));
 
         await using var app = await CreateSubject(postconfigure: builder =>
         {
@@ -373,11 +339,178 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         using var scope = app.Services.CreateScope();
         var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
 
-        // Act
         var logs = await deploymentService.GetLogsAsync(Guid.NewGuid(), ct: cancellationToken);
 
-        // Assert
         logs.Entries.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_MetadataFirst_ThenArtifactChunks()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (mockWorker, recorders) = CreateMockWorker(SuccessMessages("ok"));
+
+        await using var app = await CreateSubject(postconfigure: builder =>
+        {
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockWorker));
+        });
+
+        using var scope = app.Services.CreateScope();
+        var processService = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
+
+        var projectId = Guid.NewGuid();
+        var created = await processService.CreateAsync(
+            projectId, EnvironmentId, "10.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        await deploymentService.ExecuteAsync(
+            created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
+
+        recorders.Should().NotBeEmpty();
+        var first = recorders[0].Written;
+        first.Should().NotBeEmpty();
+        first[0].InputCase.Should().Be(StepExecutionInput.InputOneofCase.Metadata);
+
+        first.Skip(1).Should().OnlyContain(
+            x => x.InputCase == StepExecutionInput.InputOneofCase.ArtifactChunk);
+
+        recorders[0].Completed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_StreamsArtifactChunks_LastFlaggedAndConcatMatchesSnapshot()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (mockWorker, recorders) = CreateMockWorker(SuccessMessages("ok"));
+
+        var snapshotPayload = new byte[150 * 1024];
+        for (var i = 0; i < snapshotPayload.Length; i++)
+            snapshotPayload[i] = (byte)(i % 251);
+
+        await using var app = await CreateSubject(postconfigure: builder =>
+        {
+            var mockArtifactStorage = CreateMockArtifactStorage(snapshotPayload);
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockArtifactStorage));
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockWorker));
+        });
+
+        using var scope = app.Services.CreateScope();
+        var processService = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
+
+        var projectId = Guid.NewGuid();
+        var created = await processService.CreateAsync(
+            projectId, EnvironmentId, "11.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        await deploymentService.ExecuteAsync(
+            created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
+
+        var firstCall = recorders[0].Written;
+        var chunks = firstCall.Skip(1)
+            .Select(x => x.ArtifactChunk)
+            .ToList();
+
+        chunks.Should().NotBeEmpty();
+        chunks.SkipLast(1).Should().OnlyContain(c => !c.IsLast);
+        chunks[^1].IsLast.Should().BeTrue();
+
+        var reassembled = chunks.SelectMany(c => c.Data.ToByteArray()).ToArray();
+        reassembled.Should().Equal(snapshotPayload);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_InlineScriptStep_MapsToInlineScriptOneof()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (mockWorker, recorders) = CreateMockWorker(SuccessMessages("ok"));
+
+        await using var app = await CreateSubject(postconfigure: builder =>
+        {
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockWorker));
+        });
+
+        using var scope = app.Services.CreateScope();
+        var processService = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
+
+        var projectId = Guid.NewGuid();
+        var created = await processService.CreateAsync(
+            projectId, EnvironmentId, "12.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        await deploymentService.ExecuteAsync(
+            created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
+
+        var metadata = recorders[0].Written[0].Metadata;
+        metadata.Command.SourceCase.Should().Be(StepCommand.SourceOneofCase.InlineScript);
+        metadata.Command.InlineScript.Should().Be("dotnet build");
+        metadata.Command.Type.Should().Be(CommandType.Shell);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ScriptPathStep_MapsToScriptPathOneof()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (mockWorker, recorders) = CreateMockWorker(SuccessMessages("ok"));
+
+        await using var app = await CreateSubject(postconfigure: builder =>
+        {
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockWorker));
+        });
+
+        using var scope = app.Services.CreateScope();
+        var processService = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
+
+        var projectId = Guid.NewGuid();
+        var created = await processService.CreateAsync(
+            projectId, EnvironmentId, "13.0.0", YamlFixture.ValidWithScriptPath, ct: cancellationToken);
+
+        await deploymentService.ExecuteAsync(
+            created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
+
+        var metadata = recorders[0].Written[0].Metadata;
+        metadata.Command.SourceCase.Should().Be(StepCommand.SourceOneofCase.ScriptPath);
+        metadata.Command.ScriptPath.Should().Be("./scripts/build.sh");
+        metadata.Command.Type.Should().Be(CommandType.Shell);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_BuildsMetadataFromProcessStep_WithoutTargetType()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (mockWorker, recorders) = CreateMockWorker(SuccessMessages("ok"));
+
+        await using var app = await CreateSubject(postconfigure: builder =>
+        {
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockWorker));
+        });
+
+        using var scope = app.Services.CreateScope();
+        var processService = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
+
+        var projectId = Guid.NewGuid();
+        var created = await processService.CreateAsync(
+            projectId, EnvironmentId, "14.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        var result = await deploymentService.ExecuteAsync(
+            created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
+
+        var metadata = recorders[0].Written[0].Metadata;
+
+        metadata.DeploymentId.Should().Be(result.DeploymentId.ToString());
+        metadata.ProcessId.Should().Be(created.Id.ToString());
+        metadata.ProjectId.Should().Be(projectId.ToString());
+        metadata.EnvironmentId.Should().Be(EnvironmentId.ToString());
+        metadata.TargetId.Should().Be(TargetId);
+        metadata.StepName.Should().Be("build");
+        metadata.StepOrder.Should().Be(0);
+        metadata.StepId.Should().NotBeNullOrWhiteSpace();
+        metadata.Command.WorkingDirectory.Should().BeEmpty();
+        metadata.Command.TimeoutSeconds.Should().Be(0);
+
+        var descriptor = StepExecutionMetadata.Descriptor;
+        descriptor.FindFieldByName("target_type").Should().BeNull();
     }
 
     private Task<Microsoft.AspNetCore.Builder.WebApplication> CreateSubject(
@@ -387,91 +520,73 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
             preconfigure: preconfigure,
             postconfigure: builder =>
             {
-                var mockArtifactStorage = CreateMockArtifactStorage();
+                var mockArtifactStorage = CreateMockArtifactStorage(DefaultSnapshotBytes);
                 builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockArtifactStorage));
                 postconfigure?.Invoke(builder);
             });
 
-    private static ArtifactStorageGrpcService CreateMockArtifactStorage()
+    private static ArtifactStorageGrpcService CreateMockArtifactStorage(byte[] snapshotBytes)
     {
         var mock = Substitute.For<ArtifactStorageGrpcService>(
             Substitute.For<ArtifactStorageService.ArtifactStorageServiceClient>());
-        mock.GetSnapshotInfoAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        mock.DownloadSnapshotAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(callInfo => new SnapshotResult.Ok(
                 callInfo.ArgAt<string>(0),
                 callInfo.ArgAt<string>(1),
-                new byte[] { 0x01, 0x02 },
+                snapshotBytes,
                 "application/gzip",
-                2,
+                snapshotBytes.LongLength,
                 "abc123",
                 DateTimeOffset.UtcNow));
         return mock;
     }
 
-    private static WorkerGrpcService CreateMockWorkerWithSuccessResponse(string summary)
-    {
-        var messages = new List<DeploymentMessage>
-        {
-            CreateSuccessResultMessage(summary),
-        };
-
-        var mockWorker = Substitute.For<WorkerGrpcService>(
-            Substitute.For<WorkerService.WorkerServiceClient>());
-        mockWorker
-            .ExecuteDeployment(Arg.Any<DeploymentPackage>(), Arg.Any<CancellationToken>())
-            .Returns(_ => FakeGrpcStreamHelper.CreateServerStreamingCall(messages));
-
-        return mockWorker;
-    }
-
-    private static WorkerGrpcService CreateMockWorkerWithErrorResponse(
-        string errorMessage, ErrorType errorType)
-    {
-        var resultMessage = CreateErrorResultMessage(errorMessage, errorType);
-
-        var mockWorker = Substitute.For<WorkerGrpcService>(
-            Substitute.For<WorkerService.WorkerServiceClient>());
-        mockWorker
-            .ExecuteDeployment(Arg.Any<DeploymentPackage>(), Arg.Any<CancellationToken>())
-            .Returns(_ => FakeGrpcStreamHelper.CreateServerStreamingCall([resultMessage]));
-
-        return mockWorker;
-    }
-
     /// <summary>
-    /// Creates a mock Worker that returns a different message stream on each consecutive call.
-    /// After all prepared responses are consumed, the last one is replayed indefinitely.
-    /// Used to simulate multi-step pipelines (e.g. continue-after-failure, rollback).
+    /// Creates a mocked <see cref="WorkerGrpcService"/> that returns a fresh duplex
+    /// call per invocation. Each call gets its own response set; once all sets are
+    /// consumed the last one is replayed indefinitely (mirrors the old sequenced
+    /// helper used for multi-step pipelines).
     /// </summary>
-    private static WorkerGrpcService CreateMockWorkerWithSequencedResponses(
-        params List<DeploymentMessage>[] responsesPerCall)
+    private static (WorkerGrpcService Worker, List<RecordingClientStreamWriter<StepExecutionInput>> Recorders)
+        CreateMockWorker(params List<StepExecutionMessage>[] responsesPerCall)
     {
         if (responsesPerCall.Length == 0)
             throw new ArgumentException("At least one response set is required.", nameof(responsesPerCall));
 
         var mockWorker = Substitute.For<WorkerGrpcService>(
             Substitute.For<WorkerService.WorkerServiceClient>());
+        var recorders = new List<RecordingClientStreamWriter<StepExecutionInput>>();
 
         var callIndex = 0;
         mockWorker
-            .ExecuteDeployment(Arg.Any<DeploymentPackage>(), Arg.Any<CancellationToken>())
+            .ExecuteStep(Arg.Any<CancellationToken>())
             .Returns(_ =>
             {
                 var index = Math.Min(callIndex, responsesPerCall.Length - 1);
                 callIndex++;
-                return FakeGrpcStreamHelper.CreateServerStreamingCall(responsesPerCall[index]);
+                var (call, recorder) = FakeDuplexStreamingCall
+                    .Build<StepExecutionInput, StepExecutionMessage>(responsesPerCall[index]);
+                recorders.Add(recorder);
+                return call;
             });
 
-        return mockWorker;
+        return (mockWorker, recorders);
     }
 
-    private static DeploymentMessage CreateLogMessage(string message, LogLevel level)
+    private static List<StepExecutionMessage> SuccessMessages(string summary) =>
+        [CreateSuccessResultMessage(summary)];
+
+    private static List<StepExecutionMessage> ErrorMessages(string message, ErrorType type) =>
+        [CreateErrorResultMessage(message, type)];
+
+    private static StepExecutionMessage CreateLogMessage(string message, LogLevel level)
     {
-        return new DeploymentMessage
+        return new StepExecutionMessage
         {
             Log = new LogChunk
             {
                 DeploymentId = Guid.NewGuid().ToString(),
+                StepId       = Guid.NewGuid().ToString(),
                 Timestamp    = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 Level        = level,
                 Message      = message,
@@ -480,15 +595,16 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         };
     }
 
-    private static DeploymentMessage CreateSuccessResultMessage(string summary)
+    private static StepExecutionMessage CreateSuccessResultMessage(string summary)
     {
-        return new DeploymentMessage
+        return new StepExecutionMessage
         {
-            Result = new DeploymentResult
+            Result = new StepExecutionResult
             {
-                Success = new DeploymentResult.Types.Success
+                Success = new StepExecutionResult.Types.Success
                 {
                     DeploymentId = Guid.NewGuid().ToString(),
+                    StepId       = Guid.NewGuid().ToString(),
                     CompletedAt  = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     Summary      = summary,
                 },
@@ -496,16 +612,17 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         };
     }
 
-    private static DeploymentMessage CreateErrorResultMessage(
+    private static StepExecutionMessage CreateErrorResultMessage(
         string errorMessage, ErrorType errorType)
     {
-        return new DeploymentMessage
+        return new StepExecutionMessage
         {
-            Result = new DeploymentResult
+            Result = new StepExecutionResult
             {
-                Error = new DeploymentResult.Types.Error
+                Error = new StepExecutionResult.Types.Error
                 {
                     DeploymentId = Guid.NewGuid().ToString(),
+                    StepId       = Guid.NewGuid().ToString(),
                     ErrorType    = errorType,
                     Message      = errorMessage,
                 },
