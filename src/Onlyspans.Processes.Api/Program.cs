@@ -14,6 +14,8 @@ try
 
     var app = builder.Build();
 
+    await app.MigrateDatabaseAsync();
+
     app.UseSerilogLogging();
     app.UseApplication();
 
