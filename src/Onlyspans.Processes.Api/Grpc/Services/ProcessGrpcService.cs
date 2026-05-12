@@ -218,16 +218,18 @@ public sealed class ProcessGrpcService(
                 request.SnapshotKey,
                 context.CancellationToken);
 
-            var reply = new DeployProcessResult
+            var success = new DeployProcessResult.Types.Success
             {
-                Success = new DeployProcessResult.Types.Success
-                {
-                    DeploymentId = result.DeploymentId.ToString(),
-                    ProcessId    = result.ProcessId.ToString(),
-                    Status       = result.Status,
-                    Summary      = result.Summary,
-                },
+                DeploymentId = result.DeploymentId.ToString(),
+                ProcessId    = result.ProcessId.ToString(),
+                Status       = result.Status,
             };
+
+            // Protobuf string fields reject null; Summary is unset when e.g. deployment pauses for approval.
+            if (result.Summary is not null)
+                success.Summary = result.Summary;
+
+            var reply = new DeployProcessResult { Success = success };
 
             if (result.CompletedAt.HasValue)
                 reply.Success.CompletedAt = Timestamp.FromDateTimeOffset(result.CompletedAt.Value);
