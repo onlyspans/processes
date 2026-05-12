@@ -1,0 +1,18 @@
+services:
+  postgres:
+    build:
+      context: docker/postgres
+      dockerfile: Dockerfile
+    container_name: onlyspans-processes-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: processes
+    volumes:
+      - processes_pgdata:/var/lib/postgresql/data
+
+volumes:
+  processes_pgdata:

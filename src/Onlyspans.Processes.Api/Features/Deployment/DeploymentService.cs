@@ -1,3 +1,4 @@
+using Google.Protobuf;
 using Grpc.Core;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -15,8 +16,10 @@ namespace Onlyspans.Processes.Api.Features.Deployment;
 
 /// <summary>
 /// Orchestrates deployment execution following ADR-4 from target-arch.md:
-/// Processes resolves secrets + snapshot via ArtifactStorage, sends ready package to Worker,
-/// Worker streams logs back, Processes writes them to append-only files.
+/// Processes is the pipeline FSM, resolves secrets and downloads the snapshot
+/// from ArtifactStorage, then opens a Worker duplex stream per executable step
+/// to send <see cref="StepExecutionMetadata"/> + <see cref="ArtifactChunk"/>s
+/// and stream back <see cref="LogChunk"/>s and a final <see cref="StepExecutionResult"/>.
 /// </summary>
 public sealed class DeploymentService(
     ProcessesDbContext db,
@@ -26,6 +29,8 @@ public sealed class DeploymentService(
     IDeploymentLogWriter logWriter,
     ILogger<DeploymentService> logger)
 {
+    private const int ArtifactChunkSize = 64 * 1024;
+
     public async Task<DeploymentResponse> ExecuteAsync(
         Guid processId,
         string targetId,
@@ -33,6 +38,8 @@ public sealed class DeploymentService(
         string snapshotKey,
         CancellationToken ct = default)
     {
+        _ = targetType;
+
         var process = await db.Processes
             .Include(p => p.Steps.OrderBy(s => s.Order))
             .Include(p => p.Variables)
@@ -45,7 +52,7 @@ public sealed class DeploymentService(
         await db.SaveChangesAsync(ct);
 
         var resolvedVariables = await ResolveAllVariablesAsync(process, ct);
-        var resolvedSnapshotKey = await ResolveSnapshotAsync(deploymentId, snapshotKey, ct);
+        var snapshotBytes = await ResolveSnapshotBytesAsync(deploymentId, snapshotKey, ct);
 
         var orderedSteps = process.Steps
             .OrderBy(s => s.Order)
@@ -95,11 +102,10 @@ public sealed class DeploymentService(
             currentDbStep.Status = StepStatus.Running;
             await db.SaveChangesAsync(ct);
 
-            var package = BuildDeploymentPackage(
-                deploymentId, process, currentDbStep,
-                targetId, targetType, resolvedSnapshotKey, resolvedVariables);
+            var metadata = StepPackageBuilder.Build(
+                deploymentId, process, currentDbStep, targetId, resolvedVariables);
 
-            var stepResult = await ExecuteStepAsync(deploymentId, package, ct);
+            var stepResult = await ExecuteStepAsync(deploymentId, metadata, snapshotBytes, ct);
 
             if (stepResult.Success)
             {
@@ -135,8 +141,8 @@ public sealed class DeploymentService(
             await db.SaveChangesAsync(ct);
 
             var rollbackSucceeded = await ExecuteRollbackAsync(
-                deploymentId, orderedSteps, targetId, targetType,
-                resolvedSnapshotKey, resolvedVariables, process, ct);
+                deploymentId, orderedSteps, targetId,
+                snapshotBytes, resolvedVariables, process, ct);
 
             if (rollbackSucceeded)
             {
@@ -193,8 +199,7 @@ public sealed class DeploymentService(
         Guid deploymentId,
         List<ProcessStep> orderedSteps,
         string targetId,
-        string targetType,
-        string snapshotKey,
+        byte[] snapshotBytes,
         Dictionary<string, string> resolvedVariables,
         DeploymentProcess process,
         CancellationToken ct)
@@ -214,11 +219,10 @@ public sealed class DeploymentService(
                 "Rolling back step '{StepName}' for deployment {DeploymentId}",
                 step.Name, deploymentId);
 
-            var package = BuildDeploymentPackage(
-                deploymentId, process, step,
-                targetId, targetType, snapshotKey, resolvedVariables);
+            var metadata = StepPackageBuilder.Build(
+                deploymentId, process, step, targetId, resolvedVariables);
 
-            var result = await ExecuteStepAsync(deploymentId, package, ct);
+            var result = await ExecuteStepAsync(deploymentId, metadata, snapshotBytes, ct);
 
             if (!result.Success)
             {
@@ -232,63 +236,51 @@ public sealed class DeploymentService(
         return true;
     }
 
-    private async Task<StepExecutionResult> ExecuteStepAsync(
+    private async Task<StepOutcome> ExecuteStepAsync(
         Guid deploymentId,
-        DeploymentPackage package,
+        StepExecutionMetadata metadata,
+        byte[] snapshotBytes,
         CancellationToken ct)
     {
         try
         {
-            using var call = workerService.ExecuteDeployment(package, ct);
+            using var call = workerService.ExecuteStep(ct);
 
-            await foreach (var msg in call.ResponseStream.ReadAllAsync(ct))
+            // Read the response on a background path so HTTP/2 window updates are
+            // consumed while large artifact uploads are still being written (avoids
+            // write/read flow-control deadlocks on duplex streams).
+            var readerTask = Task.Run(
+                () => ConsumeStepResponseStreamAsync(deploymentId, call.ResponseStream, ct),
+                ct);
+
+            try
             {
-                switch (msg.MessageCase)
-                {
-                    case DeploymentMessage.MessageOneofCase.Log:
-                        var logChunk = msg.Log;
-                        await logWriter.AppendAsync(deploymentId, new DeploymentLogEntry
-                        {
-                            Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(logChunk.Timestamp),
-                            Level     = logChunk.Level.ToString(),
-                            Message   = logChunk.Message,
-                            Source    = logChunk.HasSource ? logChunk.Source : null,
-                        }, ct);
-                        break;
+                await call.RequestStream.WriteAsync(
+                    new StepExecutionInput { Metadata = metadata });
 
-                    case DeploymentMessage.MessageOneofCase.Result:
-                        var result = msg.Result;
-                        return result.ResultCase switch
-                        {
-                            DeploymentResult.ResultOneofCase.Success => new StepExecutionResult
-                            {
-                                Success     = true,
-                                Summary     = result.Success.Summary,
-                                CompletedAt = DateTimeOffset.FromUnixTimeMilliseconds(
-                                    result.Success.CompletedAt),
-                            },
+                await StreamArtifactChunksAsync(call.RequestStream, snapshotBytes, ct);
 
-                            DeploymentResult.ResultOneofCase.Error => new StepExecutionResult
-                            {
-                                Success       = false,
-                                ErrorMessage  = result.Error.Message,
-                                ErrorTypeName = result.Error.ErrorType.ToString(),
-                            },
+                await call.RequestStream.CompleteAsync();
 
-                            _ => new StepExecutionResult
-                            {
-                                Success      = false,
-                                ErrorMessage = "Unknown result type from Worker",
-                            },
-                        };
-                }
+                return await readerTask.ConfigureAwait(false);
             }
-
-            return new StepExecutionResult
+            catch
             {
-                Success      = false,
-                ErrorMessage = "Worker stream ended without a result message",
-            };
+                try
+                {
+                    await readerTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Prefer the writer-side exception; the reader often surfaces the same RpcException.
+                }
+
+                throw;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -302,53 +294,142 @@ public sealed class DeploymentService(
                 Source    = "processes",
             }, ct);
 
-            return new StepExecutionResult
+            return new StepOutcome
             {
                 Success       = false,
                 ErrorMessage  = ex.Message,
-                ErrorTypeName = "ERROR_TYPE_INTERNAL",
+                ErrorTypeName = nameof(ErrorType.Internal),
             };
         }
     }
 
+    private async Task<StepOutcome> ConsumeStepResponseStreamAsync(
+        Guid deploymentId,
+        global::Grpc.Core.IAsyncStreamReader<StepExecutionMessage> responseStream,
+        CancellationToken ct)
+    {
+        await foreach (var msg in responseStream.ReadAllAsync(ct))
+        {
+            switch (msg.MessageCase)
+            {
+                case StepExecutionMessage.MessageOneofCase.Log:
+                    await AppendLogAsync(deploymentId, msg.Log, ct);
+                    break;
+
+                case StepExecutionMessage.MessageOneofCase.Result:
+                    return MapResult(msg.Result);
+            }
+        }
+
+        return new StepOutcome
+        {
+            Success      = false,
+            ErrorMessage = "Worker stream ended without a result message",
+        };
+    }
+
+    private static async Task StreamArtifactChunksAsync(
+        global::Grpc.Core.IClientStreamWriter<StepExecutionInput> requestStream,
+        byte[] snapshotBytes,
+        CancellationToken ct)
+    {
+        if (snapshotBytes.Length == 0)
+        {
+            await requestStream.WriteAsync(new StepExecutionInput
+            {
+                ArtifactChunk = new ArtifactChunk
+                {
+                    Data   = ByteString.Empty,
+                    IsLast = true,
+                },
+            });
+            return;
+        }
+
+        for (var offset = 0; offset < snapshotBytes.Length; offset += ArtifactChunkSize)
+        {
+            var len = Math.Min(ArtifactChunkSize, snapshotBytes.Length - offset);
+            var isLast = offset + len >= snapshotBytes.Length;
+
+            await requestStream.WriteAsync(new StepExecutionInput
+            {
+                ArtifactChunk = new ArtifactChunk
+                {
+                    Data   = ByteString.CopyFrom(snapshotBytes, offset, len),
+                    IsLast = isLast,
+                },
+            });
+        }
+    }
+
+    private Task AppendLogAsync(Guid deploymentId, LogChunk log, CancellationToken ct)
+    {
+        return logWriter.AppendAsync(deploymentId, new DeploymentLogEntry
+        {
+            Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(log.Timestamp),
+            Level     = log.Level.ToString(),
+            Message   = log.Message,
+            Source    = log.HasSource ? log.Source : null,
+        }, ct);
+    }
+
+    private static StepOutcome MapResult(StepExecutionResult result)
+    {
+        return result.ResultCase switch
+        {
+            StepExecutionResult.ResultOneofCase.Success => new StepOutcome
+            {
+                Success     = true,
+                Summary     = result.Success.Summary,
+                CompletedAt = DateTimeOffset.FromUnixTimeMilliseconds(result.Success.CompletedAt),
+            },
+
+            StepExecutionResult.ResultOneofCase.Error => new StepOutcome
+            {
+                Success       = false,
+                ErrorMessage  = result.Error.Message,
+                ErrorTypeName = result.Error.ErrorType.ToString(),
+            },
+
+            _ => new StepOutcome
+            {
+                Success      = false,
+                ErrorMessage = "Unknown result type from Worker",
+            },
+        };
+    }
+
     /// <summary>
-    /// Validates that the snapshot exists in ArtifactStorage.
-    /// Returns the verified snapshot key to pass to Worker.
+    /// Downloads snapshot bytes from ArtifactStorage so they can be streamed
+    /// to Worker as ArtifactChunk-s. Throws if the snapshot is missing or unreadable.
     /// </summary>
-    private async Task<string> ResolveSnapshotAsync(
+    private async Task<byte[]> ResolveSnapshotBytesAsync(
         Guid deploymentId,
         string snapshotKey,
         CancellationToken ct)
     {
         logger.LogInformation(
-            "Resolving snapshot {SnapshotKey} from ArtifactStorage for deployment {DeploymentId}",
+            "Downloading snapshot {SnapshotKey} from ArtifactStorage for deployment {DeploymentId}",
             snapshotKey, deploymentId);
 
         var parts = snapshotKey.Split('@', 2);
         var key = parts[0];
         var version = parts.Length > 1 ? parts[1] : snapshotKey;
 
-        var result = await artifactStorageService.GetSnapshotInfoAsync(key, version, ct);
+        var result = await artifactStorageService.DownloadSnapshotAsync(key, version, ct);
 
-        switch (result)
+        return result switch
         {
-            case SnapshotResult.Ok ok:
-                logger.LogInformation(
-                    "Snapshot {Key}@{Version} resolved: {SizeBytes} bytes, type={ContentType}",
-                    ok.Key, ok.Version, ok.SizeBytes, ok.ContentType);
-                return snapshotKey;
+            SnapshotResult.Ok ok => ok.Content,
 
-            case SnapshotResult.NotFound notFound:
-                throw new InvalidOperationException(
-                    $"Snapshot '{notFound.Key}@{notFound.Version}' not found in ArtifactStorage: {notFound.Message}");
+            SnapshotResult.NotFound notFound => throw new InvalidOperationException(
+                $"Snapshot '{notFound.Key}@{notFound.Version}' not found in ArtifactStorage: {notFound.Message}"),
 
-            case SnapshotResult.Error error:
-                throw new InvalidOperationException(
-                    $"Failed to retrieve snapshot from ArtifactStorage: {error.Message}");
+            SnapshotResult.Error error => throw new InvalidOperationException(
+                $"Failed to download snapshot from ArtifactStorage: {error.Message}"),
 
-            default:
-                throw new InvalidOperationException("Unexpected response from ArtifactStorage");
-        }
+            _ => throw new InvalidOperationException("Unexpected response from ArtifactStorage"),
+        };
     }
 
     private async Task<Dictionary<string, string>> ResolveAllVariablesAsync(
@@ -377,32 +458,7 @@ public sealed class DeploymentService(
             resolution.Resolved, StringComparer.OrdinalIgnoreCase);
     }
 
-    private static DeploymentPackage BuildDeploymentPackage(
-        Guid deploymentId,
-        DeploymentProcess process,
-        ProcessStep step,
-        string targetId,
-        string targetType,
-        string snapshotKey,
-        Dictionary<string, string> resolvedVariables)
-    {
-        var package = new DeploymentPackage
-        {
-            DeploymentId  = deploymentId.ToString(),
-            ProjectId     = process.ProjectId.ToString(),
-            EnvironmentId = process.EnvironmentId.ToString(),
-            TargetId      = targetId,
-            SnapshotKey   = snapshotKey,
-            TargetType    = targetType,
-        };
-
-        foreach (var (key, value) in resolvedVariables)
-            package.ResolvedVariables.Add(key, value);
-
-        return package;
-    }
-
-    private sealed record StepExecutionResult
+    private sealed record StepOutcome
     {
         public required bool Success { get; init; }
         public string? Summary { get; init; }
