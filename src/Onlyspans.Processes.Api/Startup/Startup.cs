@@ -20,6 +20,7 @@ public static partial class Startup
     {
         app.UseSwaggerDocs();
         app.MapControllers();
+        app.MapHub<Features.Deployment.DeploymentLogsHub>("/hubs/deployment-logs");
         app.MapGrpcEndpoints();
         return app;
     }

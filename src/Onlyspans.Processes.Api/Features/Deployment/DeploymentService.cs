@@ -1,6 +1,7 @@
 using Google.Protobuf;
 using Grpc.Core;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using System.Text;
 using System.Text.Json;
@@ -29,6 +30,7 @@ public sealed class DeploymentService(
     ArtifactStorageGrpcService artifactStorageService,
     IVariableResolver variableResolver,
     IDeploymentLogWriter logWriter,
+    IHubContext<DeploymentLogsHub> logHub,
     ILogger<DeploymentService> logger)
 {
     private const int ArtifactChunkSize = 64 * 1024;
@@ -401,15 +403,28 @@ public sealed class DeploymentService(
         }
     }
 
-    private Task AppendLogAsync(Guid deploymentId, LogChunk log, CancellationToken ct)
+    private async Task AppendLogAsync(Guid deploymentId, LogChunk log, CancellationToken ct)
     {
-        return logWriter.AppendAsync(deploymentId, new DeploymentLogEntry
+        var entry = new DeploymentLogEntry
         {
             Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(log.Timestamp),
             Level     = log.Level.ToString(),
             Message   = log.Message,
             Source    = log.HasSource ? log.Source : null,
-        }, ct);
+        };
+
+        await logWriter.AppendAsync(deploymentId, entry, ct);
+        await logHub.Clients
+            .Group(DeploymentLogRealtime.GroupName(deploymentId))
+            .SendAsync(
+                DeploymentLogRealtime.LogEventName,
+                new DeploymentLogRealtimeMessage(
+                    deploymentId,
+                    entry.Timestamp,
+                    entry.Level,
+                    entry.Message,
+                    entry.Source),
+                ct);
     }
 
     private static StepOutcome MapResult(StepExecutionResult result)

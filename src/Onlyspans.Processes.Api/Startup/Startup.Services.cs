@@ -15,6 +15,7 @@ public static partial class Startup
         IConfiguration configuration)
     {
         services.AddControllers();
+        services.AddSignalR();
 
         services.AddSingleton<IProcessDefinitionParser, YamlProcessDefinitionParser>();
         services.AddSingleton<PipelineGraphValidator>();
