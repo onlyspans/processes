@@ -33,6 +33,7 @@ public static class StepPackageBuilder
 
         var metadata = new StepExecutionMetadata
         {
+            ExecutionId   = Guid.NewGuid().ToString("N"),
             DeploymentId  = deploymentId.ToString(),
             ProcessId     = process.Id.ToString(),
             StepId        = step.Id.ToString(),

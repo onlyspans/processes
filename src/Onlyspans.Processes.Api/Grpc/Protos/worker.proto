@@ -29,6 +29,7 @@ message StepExecutionMetadata {
 
   StepCommand command = 9;
   map<string, string> resolved_variables = 10;
+  string execution_id = 11;
 }
 
 message StepCommand {
@@ -68,6 +69,7 @@ message LogChunk {
   LogLevel level = 4;
   string message = 5;
   optional string source = 6;
+  string execution_id = 7;
 }
 
 enum LogLevel {
@@ -84,6 +86,7 @@ message StepExecutionResult {
     string step_id = 2;
     int64 completed_at = 3;
     string summary = 4;
+    string execution_id = 5;
   }
 
   message Error {
@@ -92,6 +95,7 @@ message StepExecutionResult {
     ErrorType error_type = 3;
     string message = 4;
     optional string trace = 5;
+    string execution_id = 6;
   }
 
   oneof result {
