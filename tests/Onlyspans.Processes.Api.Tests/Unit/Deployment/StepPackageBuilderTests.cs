@@ -75,6 +75,7 @@ public sealed class StepPackageBuilderTests
             DeploymentId, process, step, TargetId, new Dictionary<string, string>());
 
         metadata.DeploymentId.Should().Be(DeploymentId.ToString());
+        metadata.ExecutionId.Should().NotBeNullOrWhiteSpace();
         metadata.ProcessId.Should().Be(process.Id.ToString());
         metadata.ProjectId.Should().Be(process.ProjectId.ToString());
         metadata.EnvironmentId.Should().Be(process.EnvironmentId.ToString());

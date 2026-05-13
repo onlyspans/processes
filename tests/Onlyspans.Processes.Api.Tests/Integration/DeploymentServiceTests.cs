@@ -499,6 +499,7 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
         var metadata = recorders[0].Written[0].Metadata;
 
         metadata.DeploymentId.Should().Be(result.DeploymentId.ToString());
+        metadata.ExecutionId.Should().NotBeNullOrWhiteSpace();
         metadata.ProcessId.Should().Be(created.Id.ToString());
         metadata.ProjectId.Should().Be(projectId.ToString());
         metadata.EnvironmentId.Should().Be(EnvironmentId.ToString());
