@@ -2,6 +2,8 @@ using Google.Protobuf;
 using Grpc.Core;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using System.Text;
+using System.Text.Json;
 using Onlyspans.Processes.Api.Contracts.Responses;
 using Onlyspans.Processes.Api.Data.Contexts;
 using Onlyspans.Processes.Api.Data.Entities;
@@ -30,6 +32,10 @@ public sealed class DeploymentService(
     ILogger<DeploymentService> logger)
 {
     private const int ArtifactChunkSize = 64 * 1024;
+    private static readonly JsonSerializerOptions ManifestJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
 
     public async Task<DeploymentResponse> ExecuteAsync(
         Guid processId,
@@ -52,7 +58,40 @@ public sealed class DeploymentService(
         await db.SaveChangesAsync(ct);
 
         var resolvedVariables = await ResolveAllVariablesAsync(process, ct);
-        var snapshotBytes = await ResolveSnapshotBytesAsync(deploymentId, snapshotKey, ct);
+        byte[] snapshotBytes;
+        try
+        {
+            snapshotBytes = await ResolveSnapshotBytesAsync(deploymentId, snapshotKey, ct);
+        }
+        catch (SnapshotResolutionException ex)
+        {
+            logger.LogError(ex,
+                "Failed to resolve snapshot package {SnapshotKey} for deployment {DeploymentId}",
+                snapshotKey, deploymentId);
+
+            await logWriter.AppendAsync(deploymentId, new DeploymentLogEntry
+            {
+                Timestamp = DateTimeOffset.UtcNow,
+                Level     = "ERROR",
+                Message   = ex.Message,
+                Source    = "processes",
+            }, ct);
+
+            process.Status = ProcessStatus.Failed;
+            process.CompletedAt = DateTimeOffset.UtcNow;
+            process.UpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(ct);
+
+            return new DeploymentResponse
+            {
+                DeploymentId = deploymentId,
+                ProcessId    = processId,
+                Status       = ProcessStatus.Failed.ToString(),
+                CompletedAt  = process.CompletedAt,
+                ErrorMessage = ex.Message,
+                ErrorType    = "SnapshotResolutionFailed",
+            };
+        }
 
         var orderedSteps = process.Steps
             .OrderBy(s => s.Order)
@@ -400,8 +439,8 @@ public sealed class DeploymentService(
     }
 
     /// <summary>
-    /// Downloads snapshot bytes from ArtifactStorage so they can be streamed
-    /// to Worker as ArtifactChunk-s. Throws if the snapshot is missing or unreadable.
+    /// Downloads snapshot bytes from ArtifactStorage and resolves a JSON snapshot manifest
+    /// to the source artifact bytes expected by Worker/agent-shell.
     /// </summary>
     private async Task<byte[]> ResolveSnapshotBytesAsync(
         Guid deploymentId,
@@ -417,19 +456,101 @@ public sealed class DeploymentService(
         var version = parts.Length > 1 ? parts[1] : snapshotKey;
 
         var result = await artifactStorageService.DownloadSnapshotAsync(key, version, ct);
-
-        return result switch
+        var snapshot = result switch
         {
-            SnapshotResult.Ok ok => ok.Content,
+            SnapshotResult.Ok ok => ok,
 
-            SnapshotResult.NotFound notFound => throw new InvalidOperationException(
+            SnapshotResult.NotFound notFound => throw new SnapshotResolutionException(
                 $"Snapshot '{notFound.Key}@{notFound.Version}' not found in ArtifactStorage: {notFound.Message}"),
 
-            SnapshotResult.Error error => throw new InvalidOperationException(
+            SnapshotResult.Error error => throw new SnapshotResolutionException(
                 $"Failed to download snapshot from ArtifactStorage: {error.Message}"),
 
-            _ => throw new InvalidOperationException("Unexpected response from ArtifactStorage"),
+            _ => throw new SnapshotResolutionException("Unexpected response from ArtifactStorage"),
         };
+
+        if (!LooksLikeJsonManifest(snapshot))
+            return snapshot.Content;
+
+        logger.LogInformation(
+            "Snapshot {SnapshotKey}@{SnapshotVersion} is a JSON manifest; resolving source artifact",
+            snapshot.Key, snapshot.Version);
+
+        var manifest = ParseSnapshotManifest(snapshot);
+        var sourceArtifact = manifest.SourceArtifact;
+        if (string.IsNullOrWhiteSpace(sourceArtifact?.Key) ||
+            string.IsNullOrWhiteSpace(sourceArtifact.Version))
+        {
+            throw new SnapshotResolutionException(
+                $"Snapshot manifest '{snapshot.Key}@{snapshot.Version}' must contain sourceArtifact.key and sourceArtifact.version");
+        }
+
+        var artifactResult = await artifactStorageService.DownloadArtifactAsync(
+            sourceArtifact.Key, sourceArtifact.Version, ct);
+        var artifact = artifactResult switch
+        {
+            SnapshotResult.Ok ok => ok,
+
+            SnapshotResult.NotFound notFound => throw new SnapshotResolutionException(
+                $"Source artifact '{notFound.Key}@{notFound.Version}' referenced by snapshot manifest was not found in ArtifactStorage: {notFound.Message}"),
+
+            SnapshotResult.Error error => throw new SnapshotResolutionException(
+                $"Failed to download source artifact '{sourceArtifact.Key}@{sourceArtifact.Version}' from ArtifactStorage: {error.Message}"),
+
+            _ => throw new SnapshotResolutionException("Unexpected artifact response from ArtifactStorage"),
+        };
+
+        if (artifact.Content.Length == 0)
+        {
+            throw new SnapshotResolutionException(
+                $"Source artifact '{artifact.Key}@{artifact.Version}' referenced by snapshot manifest is empty");
+        }
+
+        return artifact.Content;
+    }
+
+    private static bool LooksLikeJsonManifest(SnapshotResult.Ok snapshot)
+    {
+        if (snapshot.ContentType.Contains("json", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        foreach (var value in snapshot.Content)
+        {
+            if (!char.IsWhiteSpace((char)value))
+                return value == (byte)'{';
+        }
+
+        return false;
+    }
+
+    private static SnapshotManifest ParseSnapshotManifest(SnapshotResult.Ok snapshot)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<SnapshotManifest>(
+                Encoding.UTF8.GetString(snapshot.Content),
+                ManifestJsonOptions)
+                ?? throw new SnapshotResolutionException(
+                    $"Snapshot manifest '{snapshot.Key}@{snapshot.Version}' is empty");
+        }
+        catch (JsonException ex)
+        {
+            throw new SnapshotResolutionException(
+                $"Snapshot manifest '{snapshot.Key}@{snapshot.Version}' is not valid JSON: {ex.Message}",
+                ex);
+        }
+    }
+
+    private sealed record SnapshotManifest(SourceArtifactRef? SourceArtifact);
+
+    private sealed record SourceArtifactRef(string? Key, string? Version);
+
+    private sealed class SnapshotResolutionException : Exception
+    {
+        public SnapshotResolutionException(string message) : base(message) { }
+
+        public SnapshotResolutionException(string message, Exception innerException)
+            : base(message, innerException) { }
     }
 
     private async Task<Dictionary<string, string>> ResolveAllVariablesAsync(

@@ -3,6 +3,7 @@ using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using NSubstitute;
+using System.Text;
 using Onlyspans.Processes.Api.Features;
 using Onlyspans.Processes.Api.Features.Deployment;
 using Onlyspans.Processes.Api.Grpc.Services;
@@ -419,6 +420,173 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
     }
 
     [Fact]
+    public async Task ExecuteAsync_WhenSnapshotIsManifest_StreamsSourceArtifactBytesToWorker()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (mockWorker, recorders) = CreateMockWorker(SuccessMessages("ok"));
+
+        var manifestBytes = Encoding.UTF8.GetBytes("""
+            {
+              "sourceArtifact": {
+                "key": "agents/repo",
+                "version": "abc123"
+              }
+            }
+            """);
+        var artifactBytes = new byte[96 * 1024];
+        for (var i = 0; i < artifactBytes.Length; i++)
+            artifactBytes[i] = (byte)(255 - i % 251);
+
+        var mockArtifactStorage = CreateMockArtifactStorage(
+            manifestBytes, "application/json", artifactBytes);
+
+        await using var app = await CreateSubject(postconfigure: builder =>
+        {
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockArtifactStorage));
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockWorker));
+        });
+
+        using var scope = app.Services.CreateScope();
+        var processService = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
+
+        var projectId = Guid.NewGuid();
+        var created = await processService.CreateAsync(
+            projectId, EnvironmentId, "11.1.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        var result = await deploymentService.ExecuteAsync(
+            created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
+
+        result.Status.Should().Be("Completed");
+
+        await mockArtifactStorage.Received(1).DownloadArtifactAsync(
+            "agents/repo", "abc123", Arg.Any<CancellationToken>());
+
+        var firstCall = recorders[0].Written;
+        var chunks = firstCall.Skip(1)
+            .Select(x => x.ArtifactChunk)
+            .ToList();
+        var reassembled = chunks.SelectMany(c => c.Data.ToByteArray()).ToArray();
+        reassembled.Should().Equal(artifactBytes);
+        reassembled.Should().NotEqual(manifestBytes);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenSnapshotIsBinaryArchive_StreamsSnapshotBytesToWorker()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (mockWorker, recorders) = CreateMockWorker(SuccessMessages("ok"));
+
+        var snapshotPayload = new byte[128 * 1024];
+        for (var i = 0; i < snapshotPayload.Length; i++)
+            snapshotPayload[i] = (byte)(i % 199);
+
+        var mockArtifactStorage = CreateMockArtifactStorage(snapshotPayload, "application/gzip");
+
+        await using var app = await CreateSubject(postconfigure: builder =>
+        {
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockArtifactStorage));
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockWorker));
+        });
+
+        using var scope = app.Services.CreateScope();
+        var processService = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
+
+        var projectId = Guid.NewGuid();
+        var created = await processService.CreateAsync(
+            projectId, EnvironmentId, "11.2.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        var result = await deploymentService.ExecuteAsync(
+            created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
+
+        result.Status.Should().Be("Completed");
+        await mockArtifactStorage.DidNotReceive().DownloadArtifactAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+
+        var chunks = recorders[0].Written.Skip(1)
+            .Select(x => x.ArtifactChunk)
+            .ToList();
+        var reassembled = chunks.SelectMany(c => c.Data.ToByteArray()).ToArray();
+        reassembled.Should().Equal(snapshotPayload);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenManifestHasNoSourceArtifact_FailsBeforeWorkerCall()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (mockWorker, recorders) = CreateMockWorker(SuccessMessages("should not run"));
+
+        var invalidManifest = Encoding.UTF8.GetBytes("""{ "projectId": "proj-1" }""");
+        var mockArtifactStorage = CreateMockArtifactStorage(invalidManifest, "application/json");
+
+        await using var app = await CreateSubject(postconfigure: builder =>
+        {
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockArtifactStorage));
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockWorker));
+        });
+
+        using var scope = app.Services.CreateScope();
+        var processService = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
+
+        var projectId = Guid.NewGuid();
+        var created = await processService.CreateAsync(
+            projectId, EnvironmentId, "11.3.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        var result = await deploymentService.ExecuteAsync(
+            created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
+
+        result.Status.Should().Be("Failed");
+        result.ErrorType.Should().Be("SnapshotResolutionFailed");
+        result.ErrorMessage.Should().Contain("sourceArtifact.key");
+        result.ErrorMessage.Should().Contain("sourceArtifact.version");
+        recorders.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenSourceArtifactNotFound_FailsBeforeWorkerCall()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (mockWorker, recorders) = CreateMockWorker(SuccessMessages("should not run"));
+
+        var manifestBytes = Encoding.UTF8.GetBytes("""
+            {
+              "sourceArtifact": {
+                "key": "agents/missing",
+                "version": "missing-version"
+              }
+            }
+            """);
+        var mockArtifactStorage = CreateMockArtifactStorage(manifestBytes, "application/json");
+        mockArtifactStorage.DownloadArtifactAsync(
+                "agents/missing", "missing-version", Arg.Any<CancellationToken>())
+            .Returns(new SnapshotResult.NotFound("agents/missing", "missing-version", "not found"));
+
+        await using var app = await CreateSubject(postconfigure: builder =>
+        {
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockArtifactStorage));
+            builder.Services.Replace(ServiceDescriptor.Scoped(_ => mockWorker));
+        });
+
+        using var scope = app.Services.CreateScope();
+        var processService = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
+
+        var projectId = Guid.NewGuid();
+        var created = await processService.CreateAsync(
+            projectId, EnvironmentId, "11.4.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        var result = await deploymentService.ExecuteAsync(
+            created.Id, TargetId, TargetType, SnapshotKey, ct: cancellationToken);
+
+        result.Status.Should().Be("Failed");
+        result.ErrorType.Should().Be("SnapshotResolutionFailed");
+        result.ErrorMessage.Should().Contain("Source artifact 'agents/missing@missing-version'");
+        recorders.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task ExecuteAsync_InlineScriptStep_MapsToInlineScriptOneof()
     {
         var cancellationToken = TestContext.Current.CancellationToken;
@@ -526,7 +694,10 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
                 postconfigure?.Invoke(builder);
             });
 
-    private static ArtifactStorageGrpcService CreateMockArtifactStorage(byte[] snapshotBytes)
+    private static ArtifactStorageGrpcService CreateMockArtifactStorage(
+        byte[] snapshotBytes,
+        string snapshotContentType = "application/gzip",
+        byte[]? artifactBytes = null)
     {
         var mock = Substitute.For<ArtifactStorageGrpcService>(
             Substitute.For<ArtifactStorageService.ArtifactStorageServiceClient>());
@@ -535,10 +706,24 @@ public sealed class DeploymentServiceTests(AppFixture appFixture) : IClassFixtur
                 callInfo.ArgAt<string>(0),
                 callInfo.ArgAt<string>(1),
                 snapshotBytes,
-                "application/gzip",
+                snapshotContentType,
                 snapshotBytes.LongLength,
                 "abc123",
                 DateTimeOffset.UtcNow));
+
+        if (artifactBytes is not null)
+        {
+            mock.DownloadArtifactAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo => new SnapshotResult.Ok(
+                    callInfo.ArgAt<string>(0),
+                    callInfo.ArgAt<string>(1),
+                    artifactBytes,
+                    "application/gzip",
+                    artifactBytes.LongLength,
+                    "artifact-sha256",
+                    DateTimeOffset.UtcNow));
+        }
+
         return mock;
     }
 

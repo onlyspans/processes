@@ -59,6 +59,58 @@ public class ArtifactStorageGrpcService(
     }
 
     /// <summary>
+    /// Downloads an artifact via server-streaming, returning metadata + full content bytes.
+    /// </summary>
+    public virtual async Task<SnapshotResult> DownloadArtifactAsync(
+        string key,
+        string version,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            using var call = client.DownloadArtifact(
+                new DownloadArtifactRequest { Key = key, Version = version },
+                cancellationToken: ct);
+
+            ArtifactInfo? header = null;
+            using var content = new MemoryStream();
+
+            await foreach (var msg in call.ResponseStream.ReadAllAsync(ct))
+            {
+                switch (msg.PayloadCase)
+                {
+                    case DownloadArtifactResponse.PayloadOneofCase.Header:
+                        header = msg.Header;
+                        break;
+                    case DownloadArtifactResponse.PayloadOneofCase.Chunk:
+                        msg.Chunk.WriteTo(content);
+                        break;
+                }
+            }
+
+            if (header is null)
+                return new SnapshotResult.Error("No header received from ArtifactStorage", null);
+
+            return new SnapshotResult.Ok(
+                header.Key,
+                header.Version,
+                content.ToArray(),
+                header.ContentType,
+                header.SizeBytes,
+                header.ChecksumSha256,
+                header.CreatedAt.ToDateTimeOffset());
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
+        {
+            return new SnapshotResult.NotFound(key, version, ex.Status.Detail);
+        }
+        catch (RpcException ex)
+        {
+            return new SnapshotResult.Error(ex.Status.Detail, ex.StackTrace);
+        }
+    }
+
+    /// <summary>
     /// Gets snapshot metadata without downloading content.
     /// </summary>
     public virtual async Task<SnapshotResult> GetSnapshotInfoAsync(
