@@ -52,9 +52,20 @@ public class ProcessesController(ProcessService processService) : ControllerBase
     }
 
     [HttpGet("by-project/{projectId:guid}")]
-    public async Task<IActionResult> ListByProject(Guid projectId, CancellationToken ct)
+    public async Task<IActionResult> ListByProject(
+        Guid projectId,
+        [FromQuery] Guid? environmentId,
+        [FromQuery] string? releaseVersion,
+        CancellationToken ct,
+        [FromQuery] bool fallbackToLatestInEnvironment = false)
     {
-        var result = await processService.ListByProjectAsync(projectId, ct);
+        var result = await processService.ListByProjectAsync(
+            projectId,
+            environmentId,
+            releaseVersion,
+            fallbackToLatestInEnvironmentWhenReleaseUnmatched: fallbackToLatestInEnvironment,
+            ct);
+
         return Ok(result);
     }
 

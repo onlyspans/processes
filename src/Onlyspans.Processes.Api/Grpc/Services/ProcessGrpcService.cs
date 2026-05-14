@@ -54,7 +54,7 @@ public sealed class ProcessGrpcService(
 
         try
         {
-            var results = await processService.ListByProjectAsync(projectId, context.CancellationToken);
+            var results = await processService.ListByProjectAsync(projectId, ct: context.CancellationToken);
 
             var reply = new ListByProjectResult.Types.Success();
             reply.Processes.AddRange(results.Select(MapToData));

@@ -373,6 +373,121 @@ public sealed class ProcessServiceTests(AppFixture appFixture) : IClassFixture<A
     }
 
     [Fact]
+    public async Task ListByProjectAsync_FilterByEnvironmentAndRelease_ReturnsMatchingRow()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var app = await CreateSubject();
+        using var scope = app.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var projectId = Guid.NewGuid();
+        var envA = Guid.NewGuid();
+        var envB = Guid.NewGuid();
+
+        await service.CreateAsync(
+            projectId, envA, "2.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+        await service.CreateAsync(
+            projectId, envB, "2.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+        await service.CreateAsync(
+            projectId, envA, "2.1.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        // Act
+        var results = await service.ListByProjectAsync(
+            projectId,
+            environmentId: envA,
+            releaseVersion: "2.0.0",
+            ct: cancellationToken);
+
+        // Assert
+        results.Should().ContainSingle();
+        results[0].EnvironmentId.Should().Be(envA);
+        results[0].ReleaseVersion.Should().Be("2.0.0");
+    }
+
+    [Fact]
+    public async Task ListByProjectAsync_FilterByReleaseNotInDb_ReturnsEmpty()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var app = await CreateSubject();
+        using var scope = app.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var projectId = Guid.NewGuid();
+        var envId = Guid.NewGuid();
+
+        await service.CreateAsync(
+            projectId, envId, "1.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        // Act — версия артефакта / snapshot может существовать без сохранённого процесса
+        var results = await service.ListByProjectAsync(
+            projectId,
+            environmentId: envId,
+            releaseVersion: "9.9.9-not-saved",
+            ct: cancellationToken);
+
+        // Assert
+        results.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ListByProjectAsync_FallbackLatestWhenReleaseMissing_ReturnsNewestForEnvironment()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var app = await CreateSubject();
+        using var scope = app.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var projectId = Guid.NewGuid();
+        var envId = Guid.NewGuid();
+
+        await service.CreateAsync(
+            projectId, envId, "1.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+        await service.CreateAsync(
+            projectId, envId, "2.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        // Act
+        var results = await service.ListByProjectAsync(
+            projectId,
+            environmentId: envId,
+            releaseVersion: "9.9.9-not-saved",
+            fallbackToLatestInEnvironmentWhenReleaseUnmatched: true,
+            ct: cancellationToken);
+
+        // Assert — последний по времени создания в этом окружении
+        results.Should().ContainSingle();
+        results[0].ReleaseVersion.Should().Be("2.0.0");
+    }
+
+    [Fact]
+    public async Task ListByProjectAsync_FallbackWhenExactMatchExists_ReturnsOnlyExact()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var app = await CreateSubject();
+        using var scope = app.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<ProcessService>();
+        var projectId = Guid.NewGuid();
+        var envId = Guid.NewGuid();
+
+        await service.CreateAsync(
+            projectId, envId, "1.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+        await service.CreateAsync(
+            projectId, envId, "2.0.0", YamlFixture.ValidSimple, ct: cancellationToken);
+
+        // Act
+        var results = await service.ListByProjectAsync(
+            projectId,
+            environmentId: envId,
+            releaseVersion: "1.0.0",
+            fallbackToLatestInEnvironmentWhenReleaseUnmatched: true,
+            ct: cancellationToken);
+
+        // Assert
+        results.Should().ContainSingle();
+        results[0].ReleaseVersion.Should().Be("1.0.0");
+    }
+
+    [Fact]
     public async Task GetByProjectAndVersionAsync_ExistingProcess_ReturnsIt()
     {
         // Arrange

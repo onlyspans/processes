@@ -174,16 +174,44 @@ public sealed class ProcessService
 
     public async Task<IReadOnlyList<ProcessResponse>> ListByProjectAsync(
         Guid projectId,
+        Guid? environmentId = null,
+        string? releaseVersion = null,
+        bool fallbackToLatestInEnvironmentWhenReleaseUnmatched = false,
         CancellationToken ct = default)
     {
-        var processes = await _db.Processes
+        var query = _db.Processes
             .Include(p => p.Steps.OrderBy(s => s.Order))
             .Include(p => p.Variables)
-            .Where(p => p.ProjectId == projectId)
+            .Where(p => p.ProjectId == projectId);
+
+        if (environmentId.HasValue)
+            query = query.Where(p => p.EnvironmentId == environmentId.Value);
+
+        if (!string.IsNullOrWhiteSpace(releaseVersion))
+            query = query.Where(p => p.ReleaseVersion == releaseVersion);
+
+        var processes = await query
             .OrderByDescending(p => p.CreatedAt)
             .ToListAsync(ct);
 
-        return processes.Select(MapToResponse).ToList();
+        if (processes.Count > 0)
+            return processes.Select(MapToResponse).ToList();
+
+        if (fallbackToLatestInEnvironmentWhenReleaseUnmatched
+            && environmentId.HasValue
+            && !string.IsNullOrWhiteSpace(releaseVersion))
+        {
+            var fallback = await _db.Processes
+                .Include(p => p.Steps.OrderBy(s => s.Order))
+                .Include(p => p.Variables)
+                .Where(p => p.ProjectId == projectId && p.EnvironmentId == environmentId.Value)
+                .OrderByDescending(p => p.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+
+            return fallback is null ? [] : [MapToResponse(fallback)];
+        }
+
+        return [];
     }
 
     public async Task<ProcessResponse?> GetByProjectAndVersionAsync(
