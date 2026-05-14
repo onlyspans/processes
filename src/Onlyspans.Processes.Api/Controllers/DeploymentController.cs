@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http.Timeouts;
 using Microsoft.AspNetCore.Mvc;
 using Onlyspans.Processes.Api.Contracts.Requests;
 using Onlyspans.Processes.Api.Features.Deployment;
@@ -9,6 +10,7 @@ namespace Onlyspans.Processes.Api.Controllers;
 public class DeploymentController(DeploymentService deploymentService) : ControllerBase
 {
     [HttpPost]
+    [RequestTimeout("DeploymentExecute")]
     public async Task<IActionResult> Execute(
         [FromBody] DeployProcessRequest request,
         CancellationToken ct)

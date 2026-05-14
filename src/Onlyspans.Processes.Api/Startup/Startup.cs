@@ -6,13 +6,18 @@ public static partial class Startup
         this IServiceCollection services,
         IConfiguration configuration)
     {
+        var allowedOrigins = configuration
+            .GetSection("Cors:AllowedOrigins")
+            .Get<string[]>() ?? ["http://localhost:3000"];
+
         services
             .AddDatabase(configuration)
             .AddProcessServices(configuration)
             .AddCors(o => o.AddPolicy("open", p => p
-                .AllowAnyOrigin()
+                .WithOrigins(allowedOrigins)
                 .AllowAnyHeader()
-                .AllowAnyMethod()))
+                .AllowAnyMethod()
+                .AllowCredentials()))
             .AddGrpcServices()
             .AddGrpcClients(configuration)
             .AddSwaggerDocs();
@@ -24,8 +29,10 @@ public static partial class Startup
     {
         app.UseSwaggerDocs();
         app.UseCors("open");
+        app.UseRequestTimeouts();
         app.MapControllers();
-        app.MapHub<Features.Deployment.DeploymentLogsHub>("/hubs/deployment-logs");
+        app.MapHub<Features.Deployment.DeploymentLogsHub>("/hubs/deployment-logs")
+            .RequireCors("open");
         app.MapGrpcEndpoints();
         return app;
     }

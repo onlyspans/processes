@@ -1,3 +1,4 @@
+using System.Globalization;
 using FluentValidation;
 using Onlyspans.Processes.Api.Features;
 using Onlyspans.Processes.Api.Features.Deployment;
@@ -15,6 +16,10 @@ public static partial class Startup
         IConfiguration configuration)
     {
         services.AddControllers();
+        services.AddRequestTimeouts(options =>
+            options.AddPolicy(
+                "DeploymentExecute",
+                DeploymentExecuteRequestTimeout(configuration)));
         services.AddSignalR();
 
         services.AddSingleton<IProcessDefinitionParser, YamlProcessDefinitionParser>();
@@ -30,5 +35,14 @@ public static partial class Startup
         services.AddScoped<DeploymentService>();
 
         return services;
+    }
+
+    private static TimeSpan DeploymentExecuteRequestTimeout(IConfiguration configuration)
+    {
+        var raw = configuration["Deployment:ExecuteRequestTimeout"];
+        if (string.IsNullOrWhiteSpace(raw))
+            return TimeSpan.FromMinutes(5);
+
+        return TimeSpan.Parse(raw, CultureInfo.InvariantCulture);
     }
 }

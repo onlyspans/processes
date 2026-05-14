@@ -1,3 +1,4 @@
+using System.Globalization;
 using ArtifactStorage.Communication;
 using Onlyspans.Processes.Api.Grpc.Services;
 using Variables.Communication;
@@ -24,10 +25,13 @@ public static partial class Startup
             ?? throw new InvalidOperationException(
                 "GrpcServices:Worker address is not configured");
 
+        var workerHttpClientTimeout = ParseWorkerHttpClientTimeout(configuration);
+
         services.AddGrpcClient<WorkerService.WorkerServiceClient>(options =>
         {
             options.Address = new Uri(workerAddress);
-        });
+        })
+            .ConfigureHttpClient(client => client.Timeout = workerHttpClientTimeout);
 
         var artifactStorageAddress = configuration["GrpcServices:ArtifactStorage"]
             ?? throw new InvalidOperationException(
@@ -43,5 +47,14 @@ public static partial class Startup
         services.AddScoped<ArtifactStorageGrpcService>();
 
         return services;
+    }
+
+    private static TimeSpan ParseWorkerHttpClientTimeout(IConfiguration configuration)
+    {
+        var raw = configuration["GrpcServices:WorkerHttpClientTimeout"];
+        if (string.IsNullOrWhiteSpace(raw))
+            return TimeSpan.FromHours(1);
+
+        return TimeSpan.Parse(raw, CultureInfo.InvariantCulture);
     }
 }
