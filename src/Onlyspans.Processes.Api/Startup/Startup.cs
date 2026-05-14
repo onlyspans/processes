@@ -9,6 +9,10 @@ public static partial class Startup
         services
             .AddDatabase(configuration)
             .AddProcessServices(configuration)
+            .AddCors(o => o.AddPolicy("open", p => p
+                .AllowAnyOrigin()
+                .AllowAnyHeader()
+                .AllowAnyMethod()))
             .AddGrpcServices()
             .AddGrpcClients(configuration)
             .AddSwaggerDocs();
@@ -19,6 +23,7 @@ public static partial class Startup
     public static WebApplication UseApplication(this WebApplication app)
     {
         app.UseSwaggerDocs();
+        app.UseCors("open");
         app.MapControllers();
         app.MapHub<Features.Deployment.DeploymentLogsHub>("/hubs/deployment-logs");
         app.MapGrpcEndpoints();
