@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Onlyspans.Processes.Api.Contracts.Requests;
 using Onlyspans.Processes.Api.Features;
 
 namespace Onlyspans.Processes.Api.Controllers;
@@ -7,6 +8,42 @@ namespace Onlyspans.Processes.Api.Controllers;
 [Route("api/[controller]")]
 public class ProcessesController(ProcessService processService) : ControllerBase
 {
+    [HttpPost("validate")]
+    public async Task<IActionResult> Validate(
+        [FromBody] ValidateProcessRequest request,
+        CancellationToken ct)
+    {
+        var result = await processService.ValidateAsync(
+            request.Yaml,
+            request.ProjectId,
+            request.EnvironmentId,
+            ct);
+
+        return Ok(result);
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> Create(
+        [FromBody] CreateProcessRequest request,
+        CancellationToken ct)
+    {
+        try
+        {
+            var result = await processService.CreateAsync(
+                request.ProjectId,
+                request.EnvironmentId,
+                request.ReleaseVersion,
+                request.Yaml,
+                ct);
+
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> GetById(Guid id, CancellationToken ct)
     {
